@@ -1,0 +1,20 @@
+# 验证「ESAM 解码器 = 把 FastSAM mask 合并到 ScanNet 粒度」的实验配置
+esam_root: /home/yqx/SegmentAnything3D/ESAM
+esam_config: configs/ESAM-E_CA/ESAM-E_online_scannet200_CA.py     # 相对 esam_root
+checkpoint: /home/yqx/SegmentAnything3D/ESAM/checkpoints/ESAM-E_CA_online_epoch_128.pth
+fastsam_checkpoint: /home/yqx/SegmentAnything3D/AutoSeg3D/data/FastSAM-x.pt
+workspace: work_dirs/esam_eval           # ESAM 格式数据 + 导出的预测都在这里
+raw_roots:
+  - /home/yqx/SegmentAnything3D/SparseSAM3D/worktrees/cvpr-20261004/data/scannet20_raw/scans
+  - /home/yqx/SegmentAnything3D/SparseSAM3D/worktrees/cvpr-20261004/data/scannet_stage2_raw/scans
+sens_stride: 20        # 与 ESAM 预处理一致：先每 20 帧导出，process_cur_scan 再隔一帧取（=40 帧间隔）
+seed: 0
+# 拥有完整原始数据（.sens + 标注 + axisAlignment）的 16 个 ScanNet 验证场景
+scenes: [scene0050_00, scene0084_00, scene0208_00, scene0328_00, scene0334_00, scene0412_00,
+         scene0414_00, scene0441_00, scene0488_00, scene0580_00, scene0593_00, scene0595_00,
+         scene0621_00, scene0663_00, scene0690_00, scene0693_00]
+eval:
+  iou_thresholds: [0.25, 0.5]
+  purity: 0.8           # oracle 合并：purity >= 该值的 FastSAM 组才参与合并
+  min_gt_points: 100    # 与 ESAM npoint_thr 同量级；更小的 GT 实例不统计
+  adj_eps: 0.05         # Oracle-adj：两组点间最近距离 < ε 视为相邻（米）

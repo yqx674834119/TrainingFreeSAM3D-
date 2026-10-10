@@ -8,8 +8,24 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | ESAM 模块 | 本项目 | 状态 |
 |---|---|---|
 | Query Lifting | `freesam3d/lifting/` | ✅ baseline 完成 |
-| Query Refinement / Decoder | `freesam3d/refinement/`（待建） | — |
-| Query Merging（跨帧） | `freesam3d/merging/`（待建） | — |
+| Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
+| 轻量合并模型 GroupMergeNet | `freesam3d/merging/`（待建） | 📝 设计见 [docs/merge_net_design.zh-CN.md](docs/merge_net_design.zh-CN.md) |
+| Query Merging（跨帧） | 待建 | — |
+
+环境：`source tools/env.sh`（venv + CUDA 动态链接，见 AGENTS.md §4）。
+
+## ESAM 粒度对齐验证（摘要）
+
+在 16 个 ScanNet 验证场景、809 帧上运行官方 ESAM-E，逐帧比较 FastSAM 分组、ESAM 解码器
+输出和 GT oracle（thing 实例，平均最佳 IoU / 召回@0.5）：
+
+| FastSAM | ESAM-snap（只整组合并） | ESAM | Oracle-adj（只合并相邻组） | Oracle（任意合并） |
+|---|---|---|---|---|
+| 0.532 / 0.515 | 0.702 / 0.792 | 0.754 / 0.837 | 0.769 / 0.847 | 0.784 / 0.871 |
+
+ESAM 每个 mask 平均合并 7 个 FastSAM 组，解码器 77% 的提升来自整组合并。详见
+[docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md)；复现命令为
+`tools/esam_prepare.py`、`tools/esam_export.py`、`tools/esam_granularity.py`。
 
 ## 模块 1：Query Lifting
 

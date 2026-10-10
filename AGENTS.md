@@ -22,7 +22,10 @@ TrainingFreeSAM3D/
 │   │   ├── grouping.py     #     重叠 mask → 互斥分组、未覆盖点补组
 │   │   ├── pooling.py      #     逐点特征 → 分组(query)特征
 │   │   └── query_lifting.py#     本阶段的编排（只编排，不写具体算法）
-│   ├── analysis/           #   与 GT 对比的指标（相似度、AUC、purity）
+│   ├── analysis/           #   特征层面的分析（相似度、AUC、purity）
+│   ├── evaluation/         #   实例层面的评估（IoU 匹配、class-agnostic AP、粒度诊断）
+│   ├── esam/               #   调用官方 ESAM 的桥接层：数据准备、导出预测
+│   │                       #     （只 import ESAM，不修改 ESAM 仓库的代码和数据）
 │   └── vis/                #   所有画图/导出 PLY 的代码
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）
@@ -43,6 +46,8 @@ TrainingFreeSAM3D/
 - 新增池化方式（如几何感知池化）：在 `freesam3d/lifting/pooling.py` 中新增函数，
   通过配置 `pooling.method` 选择；保留 `mean_l2` baseline 不删。
 - 一次性调试脚本放在会话临时目录，不要提交到仓库根目录。
+- 需要跑官方 ESAM 时，通过 `freesam3d/esam/` 调用，数据根目录放在本项目的
+  `work_dirs/esam_eval/` 下。不要往 `/home/yqx/SegmentAnything3D/ESAM/data` 里写东西。
 - 不复制第三方仓库或权重进本项目；外部路径（FastSAM 权重、ScanNet 原始数据、
   ESAM、Personalize-SAM）只在 `configs/*.yaml` 中引用。
 
