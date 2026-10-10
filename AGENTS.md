@@ -57,9 +57,11 @@ TrainingFreeSAM3D/
 
 ## 4. 运行环境
 
-- Python 环境：`source /home/yqx/SegmentAnything3D/AutoSeg3D/.venv/bin/activate`
-  （已含 torch、ultralytics 8.0.120、fastsam、sklearn、scipy、plyfile）。
-- 当前机器 CUDA 不可用时，`device: auto` 会自动退回 CPU。
+- 环境：`source tools/env.sh`。它激活 `AutoSeg3D/.venv`（torch、ultralytics 8.0.120、
+  fastsam、sklearn、scipy、plyfile），并把与内核驱动匹配的 NVIDIA 用户态库
+  （`/home/yqx/.cache/openjev/driver-580.173.02`）放到 `LD_LIBRARY_PATH` 最前面。
+  不这样做时，CUDA 会报 804 或 driver/library mismatch。默认 `CUDA_VISIBLE_DEVICES=3`。
+- `device: auto` 在 CUDA 不可用时退回 CPU，结果与 GPU 一致（差异在浮点误差内）。
 - 模型下载优先 ModelScope，其次 Hugging Face。
 - 查看大于 1M 像素的图片前先缩小或压缩。
 

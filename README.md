@@ -32,7 +32,7 @@ FastSAM 没有 SAM 的 ViT 和 neck。各特征层与 SAM 的对应关系，以�
 
 ```bash
 cd /home/yqx/SegmentAnything3D/TrainingFreeSAM3D
-source /home/yqx/SegmentAnything3D/AutoSeg3D/.venv/bin/activate
+source tools/env.sh          # venv + CUDA 动态链接（见 AGENTS.md §4）
 python tools/run_query_lifting.py --output work_dirs/query_lifting/baseline_mean_l2
 # 变体：先减帧均值再池化
 python tools/run_query_lifting.py --output work_dirs/query_lifting/center_mean_l2 \
@@ -42,7 +42,7 @@ python tools/run_query_lifting.py --inputs <frame.npz> --opts "features=[backbon
 pytest -q tests
 ```
 
-CPU 上每帧约 11 秒（含 GT 和画图）。
+每帧耗时（含 GT 和画图）：GPU 约 5 秒，CPU 约 11 秒。
 
 ### 输出（每帧一个目录）
 
