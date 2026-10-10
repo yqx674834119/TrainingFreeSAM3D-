@@ -1,0 +1,38 @@
+# Query Lifting (training-free) — ESAM 对标配置
+fastsam:
+  checkpoint: /home/yqx/SegmentAnything3D/AutoSeg3D/data/FastSAM-x.pt
+  device: auto            # auto | cpu | cuda
+  imgsz: 640              # ESAM: imgsz=640
+  conf: 0.1               # ESAM: conf=0.1
+  iou: 0.9                # ESAM: iou=0.9
+  fallback_iou: 0.7       # ESAM: 无结果时改用 iou=0.7 重跑
+
+# 逐点特征来源，见 docs/fastsam_features.zh-CN.md
+features: [backbone, neck_p3, neck_fpn, proto_hidden, proto]
+
+lifting:
+  num_points: 20000       # ESAM: random_sampling(xyz_all, 20000)
+  depth_scale: 1000.0     # ScanNet 深度单位 mm
+  min_depth_raw: 0.1      # ESAM: depth_map > 0.1（原始单位）
+  fill_clusters: 20       # ESAM: KMeans(n_clusters=20)
+  fill_min_points: 20     # ESAM: 未覆盖点 < 20 时并成一组
+  fill_features: xyz_rgb  # ESAM 原版 = xyz_rgb；可选 xyz
+  seed: 0
+
+pooling:
+  method: mean_l2         # baseline: 组内平均池化 + L2 归一化；可选 center_mean_l2（先减帧均值）
+
+gt:
+  enabled: true
+  scans_roots:            # 依次查找 <root>/<scene>/<scene>_vh_clean_2.ply 等
+    - /home/yqx/SegmentAnything3D/SparseSAM3D/worktrees/cvpr-20261004/data/scannet20_raw/scans
+    - /home/yqx/SegmentAnything3D/SparseSAM3D/worktrees/cvpr-20261004/data/scannet_stage2_raw/scans
+  label_tsv: /home/yqx/SegmentAnything3D/ESAM/data/scannet/meta_data/scannetv2-labels.combined.tsv
+  bbox_margin: 0.05       # ESAM select_points_in_bbox 的 delta
+
+analysis:
+  min_points_per_group: 10   # 少于该点数的组不进入相似度分析（只影响可视化/指标）
+  min_purity: 0.8            # mask_pure 指标只用 GT purity >= 该值的 mask，排除 GT 噪声/欠分割
+
+inputs: /home/yqx/SegmentAnything3D/ESAM/work_dirs/feature_benchmark/inputs
+output_dir: work_dirs/query_lifting
