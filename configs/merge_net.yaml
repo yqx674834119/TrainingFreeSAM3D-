@@ -19,6 +19,7 @@ boundary_feature: proto      # 交界点局部对比用哪一层：必须是细�
 cache_root: work_dirs/merge_cache
 
 graph:
+  backend: gpu            # gpu = 全矩阵运算（cdist + scatter，6–8 ms）；cpu = KD-tree 参考实现（56 ms）
   voxel: 0.02             # 建邻接图前体素化（米）；0 = 直接在 20k 点上查
   adjacency_eps: 0.05     # 两组点距 < ε 视为相邻（米）
   boundary_k: 32          # 每条边取最近的 k 对交界点算局部特征对比

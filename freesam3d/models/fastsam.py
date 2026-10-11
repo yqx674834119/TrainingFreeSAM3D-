@@ -28,7 +28,7 @@ FEATURE_SPECS = {
 class FastSAMOutput:
     masks: np.ndarray          # (N, H, W) bool, on the original image grid
     scores: np.ndarray         # (N,) confidence
-    feature_maps: dict         # name -> (1, C, h, w) float32 tensor on CPU
+    feature_maps: dict         # name -> (1, C, h, w) float32 tensor (on ``device`` of the runner)
     input_hw: tuple            # letterboxed network input size
     gain: float                # original -> input scale
     pad: tuple                 # (left, top) letterbox padding in input pixels
@@ -59,7 +59,7 @@ def resolve_device(device):
 
 class FastSAMRunner:
     def __init__(self, checkpoint, device='auto', imgsz=640, conf=0.1, iou=0.9,
-                 fallback_iou=0.7, features=('backbone', 'neck_p3')):
+                 fallback_iou=0.7, features=('backbone', 'neck_p3'), keep_on_device=True):
         unknown = set(features) - set(FEATURE_SPECS)
         if unknown:
             raise KeyError(f'unknown features {sorted(unknown)}; available {sorted(FEATURE_SPECS)}')
@@ -67,6 +67,7 @@ class FastSAMRunner:
         self.kwargs = dict(device=self.device, retina_masks=True, imgsz=imgsz, conf=conf, verbose=False)
         self.iou, self.fallback_iou = iou, fallback_iou
         self.features = tuple(features)
+        self.keep_on_device = keep_on_device      # False: copy maps to CPU (legacy behaviour)
         self.model = _load_fastsam(checkpoint)
         self._captured = {}
         self._register_hooks()
@@ -77,7 +78,8 @@ class FastSAMRunner:
 
         def save(key):
             def hook(_m, _inp, out):
-                self._captured[key] = out.detach().float().cpu()
+                t = out.detach().float()
+                self._captured[key] = t if self.keep_on_device else t.cpu()
             return hook
         needed = {src for f in self.features for src in FEATURE_SPECS[f][0]}
         for key in needed:
@@ -93,11 +95,21 @@ class FastSAMRunner:
     @torch.inference_mode()
     def __call__(self, rgb):
         bgr = np.ascontiguousarray(rgb[..., ::-1])   # ultralytics expects cv2 BGR arrays
-        self._captured.clear()
-        results = self.model(bgr, iou=self.iou, **self.kwargs)
-        if not results:                              # ESAM: retry with iou=0.7
+        # ultralytics select_device() rewrites CUDA_VISIBLE_DEVICES process-wide ('-1' for cpu)
+        # and never restores it, which disables CUDA for everything else in the process.
+        import os
+        visible = os.environ.get('CUDA_VISIBLE_DEVICES')
+        try:
             self._captured.clear()
-            results = self.model(bgr, iou=self.fallback_iou, **self.kwargs)
+            results = self.model(bgr, iou=self.iou, **self.kwargs)
+            if not results:                          # ESAM: retry with iou=0.7
+                self._captured.clear()
+                results = self.model(bgr, iou=self.fallback_iou, **self.kwargs)
+        finally:
+            if visible is None:
+                os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+            else:
+                os.environ['CUDA_VISIBLE_DEVICES'] = visible
         h, w = rgb.shape[:2]
         if results and results[0].masks is not None:
             masks = results[0].masks.data.cpu().numpy() == 1.0   # ESAM format_result
@@ -127,7 +139,7 @@ def sample_point_features(fmap, pixels_xy, out: FastSAMOutput):
     Pixel centres are mapped into the letterboxed input; ``fmap`` covers the
     whole input (stride divides it), so ``align_corners=False`` is exact.
     """
-    xy = torch.as_tensor(pixels_xy, dtype=torch.float32)
+    xy = torch.as_tensor(np.asarray(pixels_xy), dtype=torch.float32, device=fmap.device)
     x_in = (xy[:, 0] + 0.5) * out.gain + out.pad[0]
     y_in = (xy[:, 1] + 0.5) * out.gain + out.pad[1]
     grid = torch.stack([2 * x_in / out.input_hw[1] - 1, 2 * y_in / out.input_hw[0] - 1], -1)

@@ -17,6 +17,7 @@ lifting:
   fill_clusters: 20       # ESAM: KMeans(n_clusters=20)
   fill_min_points: 20     # ESAM: 未覆盖点 < 20 时并成一组
   fill_features: xyz_rgb  # ESAM 原版 = xyz_rgb；可选 xyz
+  fill_backend: sklearn   # sklearn = ESAM 原版 KMeans(n_init=10)，约 140 ms；torch = GPU Lloyd，约 8 ms
   seed: 0
 
 pooling:

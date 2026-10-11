@@ -26,8 +26,9 @@ TrainingFreeSAM3D/
 │   ├── evaluation/         #   实例层面的评估（IoU 匹配、class-agnostic AP、粒度诊断）
 │   ├── esam/               #   调用官方 ESAM 的桥接层：数据准备、导出预测
 │   │                       #     （只 import ESAM，不修改 ESAM 仓库的代码和数据）
-│   ├── merging/            #   GroupMergeNet：组邻接图(graph)、标签(labels)、缓存(cache)、
-│   │                       #     数据(data)、模型(model)、训练(train)、聚类(cluster)、评估(evaluate)、探针(probe)
+│   ├── merging/            #   GroupMergeNet：组邻接图(graph=CPU 参考, graph_gpu=矩阵版)、标签(labels)、
+│   │                       #     缓存(cache)、数据(data)、模型(model)、训练(train)、聚类(cluster)、
+│   │                       #     评估(evaluate)、探针(probe)、单次推理入口(infer)
 │   └── vis/                #   所有画图/导出 PLY 的代码
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）
@@ -53,6 +54,9 @@ TrainingFreeSAM3D/
 - 任何可训练模块：先写 `tools/*_probe.py` 回答「输入是否有信号」再训练；阈值只在留出的
   训练场景上标定，验证集（16 个场景）只用于最终汇报。新的边/节点特征加在
   `merging/graph.py` 的 `edge_feature_names()` / `NODE_GEOM` 中并同步更新测试。
+- 推理路径优先用矩阵运算（`one_hot.T @ X`、`cdist`、`scatter_reduce`），不用 KD-tree /
+  sklearn / 逐边 Python 循环；每个 GPU 实现必须有与 CPU 参考实现对照的单元测试，
+  并用 `tools/merge_benchmark.py` 记录逐阶段耗时。
 - 不复制第三方仓库或权重进本项目；外部路径（FastSAM 权重、ScanNet 原始数据、
   ESAM、Personalize-SAM）只在 `configs/*.yaml` 中引用。
 

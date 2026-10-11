@@ -13,6 +13,7 @@ from PIL import Image
 from ..io.frames import RGBDFrame
 from ..lifting.query_lifting import QueryLifting
 from .graph import build_graph
+from .graph_gpu import build_graph_gpu
 from .labels import edge_labels, group_purity
 
 
@@ -56,11 +57,18 @@ class CacheBuilder:
         px = lifted.pixels
         gt = inst[px[:, 1], px[:, 0]]
         nyu = label[px[:, 1], px[:, 0]]
-        pf = lifted.point_feats[self.boundary_feature].numpy()
-        g = build_graph(lifted.xyz, lifted.rgb, lifted.group_ids, lifted.group_feats[self.feature].numpy(), pf,
-                        lifted.fastsam.scores, lifted.group_mask_index, lifted.fastsam.masks,
-                        self.gcfg['adjacency_eps'], self.gcfg['voxel'], self.gcfg['boundary_k'],
-                        self.gcfg.get('feature_centering', True))
+        pf = lifted.point_feats[self.boundary_feature]
+        gf = lifted.group_feats[self.feature]
+        if self.gcfg.get('backend', 'cpu') == 'gpu':
+            g = build_graph_gpu(lifted.xyz, lifted.rgb, lifted.group_ids, gf, pf, lifted.fastsam.scores,
+                                lifted.group_mask_index, lifted.fastsam.masks, self.gcfg['adjacency_eps'],
+                                self.gcfg['voxel'], self.gcfg['boundary_k'], self.gcfg.get('feature_centering', True),
+                                device=self.lifting.runner.device)
+        else:
+            g = build_graph(lifted.xyz, lifted.rgb, lifted.group_ids, gf.cpu().numpy(), pf.cpu().numpy(),
+                            lifted.fastsam.scores, lifted.group_mask_index, lifted.fastsam.masks,
+                            self.gcfg['adjacency_eps'], self.gcfg['voxel'], self.gcfg['boundary_k'],
+                            self.gcfg.get('feature_centering', True))
         y, valid = edge_labels(lifted.group_ids, gt, g.edges, self.lcfg['purity'], self.lcfg['min_labeled'])
         major, pur, lab = group_purity(lifted.group_ids, gt, len(g.sizes))
         sem_major = majority_semantic(lifted.group_ids, gt, nyu, len(g.sizes))

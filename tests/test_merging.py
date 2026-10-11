@@ -1,5 +1,8 @@
 import numpy as np
+import pytest
 import torch
+
+HAS_CUDA = torch.cuda.is_available()
 
 from freesam3d.merging.cluster import average_linkage, connected_components, merge_groups
 from freesam3d.merging.graph import EDGE_DIM, NODE_GEOM, build_graph, edge_feature_names
@@ -105,3 +108,58 @@ def test_objectness_labels_and_head():
     e, o = m(torch.from_numpy(g.node_geom), torch.from_numpy(g.node_feat), torch.from_numpy(g.edges),
              torch.from_numpy(g.edge_feat), return_objectness=True)
     assert e.shape == (len(g.edges),) and o.shape == (3,)
+
+
+def test_gpu_graph_matches_cpu_on_toy():
+    if not HAS_CUDA:
+        pytest.skip('no CUDA')
+    from freesam3d.merging.graph_gpu import build_graph_gpu
+    xyz, rgb, groups, feat, pf = _toy_frame()
+    c = build_graph(xyz, rgb, groups, feat, pf, eps=0.05, voxel=0.02, boundary_k=10 ** 9, feature_centering=False)
+    g = build_graph_gpu(xyz, rgb, groups, feat, pf, eps=0.05, voxel=0.02, feature_centering=False)
+    assert c.edges.tolist() == g.edges.tolist()
+    # column 1 (height) uses the frame-median z: torch.median takes the lower middle, numpy averages
+    np.testing.assert_allclose(np.delete(c.node_geom, 1, 1), np.delete(g.node_geom, 1, 1), atol=1e-4)
+    np.testing.assert_allclose(c.node_geom[:, 1], g.node_geom[:, 1], atol=1e-2)
+    # all columns except contact_norm (sub-point counting differs slightly) within tolerance
+    names = edge_feature_names()
+    for i, n in enumerate(names):
+        if n == 'contact_norm':
+            continue
+        np.testing.assert_allclose(c.edge_feat[:, i], g.edge_feat[:, i], atol=2e-2, err_msg=n)
+
+
+def test_torch_kmeans_fill_groups_uncovered_points():
+    if not HAS_CUDA:
+        pytest.skip('no CUDA')
+    from freesam3d.lifting.grouping import fill_uncovered
+    rng = np.random.default_rng(0)
+    x = np.concatenate([rng.normal(0, 0.05, (60, 3)), rng.normal(3, 0.05, (60, 3))])
+    ids = np.full(120, -1)
+    out = fill_uncovered(ids, x, n_clusters=2, min_points=20, seed=0, base=5, backend='torch')
+    assert set(out.tolist()) == {5, 6}
+    assert len(set(out[:60])) == 1 and len(set(out[60:])) == 1
+
+
+def test_gpu_exclusive_map_and_backproject_match_numpy():
+    if not HAS_CUDA:
+        pytest.skip('no CUDA')
+    from freesam3d.lifting.grouping import exclusive_group_map, exclusive_group_map_torch
+    from freesam3d.lifting.geometry import backproject, backproject_torch
+    rng = np.random.default_rng(0)
+    masks = np.zeros((6, 40, 50), bool)
+    for i in range(6):
+        y, x = rng.integers(0, 30), rng.integers(0, 40)
+        masks[i, y:y + rng.integers(3, 12), x:x + rng.integers(3, 12)] = True
+    masks[3] = masks[2]                                  # exact tie in area -> later index wins
+    ref = exclusive_group_map(masks)
+    out = exclusive_group_map_torch(torch.as_tensor(masks, device='cuda')).cpu().numpy()
+    assert np.array_equal(ref, out)
+    depth = (rng.random((40, 50)) * 3000).astype(np.uint16)
+    depth[::7] = 0
+    K = np.array([[500.0, 0, 25], [0, 500.0, 20], [0, 0, 1]])
+    pose = np.eye(4); pose[:3, 3] = [1, 2, 3]
+    xyz, px = backproject(depth, K, pose)
+    xyz_t, px_t = backproject_torch(depth, K, pose)
+    np.testing.assert_allclose(xyz, xyz_t.cpu().numpy(), atol=1e-4)
+    assert np.array_equal(px, px_t.cpu().numpy())

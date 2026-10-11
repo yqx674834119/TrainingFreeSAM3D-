@@ -19,8 +19,8 @@
 
 - 相对 FastSAM：IoU +0.095，召回@0.5 +0.173，AP50 +0.269。三个随机种子的 IoU 在 0.627–0.630、AP50 在 0.487–0.506。
 - 距 ESAM-snap 仍差 0.075 IoU、0.106 召回、0.203 AP50；本模块的理论上限（Oracle-adj）为 0.757。
-- 推理：建图 68 ms + 模型 3 ms + 聚类 9 ms ≈ **80 ms/帧**（RTX 5090；CPU 上 86 ms），checkpoint 167 KB。
-  模型本身只占 4%。
+- 推理：FastSAM 72 ms + 合并模块 **28 ms**（提升 12 + 特征 1 + 建图 8 + 模型 2 + 聚类 3）= 100 ms/帧，
+  全部矩阵运算、无 KD-tree；checkpoint 167 KB。ESAM-E 的 3D 部分实测 110 ms/帧。
 
 ## 1. FastSAM 特征值不值得学？
 
@@ -52,16 +52,27 @@ normal_angle 0.642、nested 0.606、boundary_cos 0.582。
   同一个特征格里，正负边都是 0.99，完全无信号。即便换成 proto，增益也很小（+0.000–0.003）。
 - 原始 mask 嵌套（互斥化之前一个 FastSAM mask 是否包含另一个）是最便宜、最稳定的额外线索（+0.008 AUC）。
 
-## 2. 推理开销——「输入庞杂」没有拖慢推理
+## 2. 推理开销——全 GPU 矩阵路径，不建 KD-tree
 
-| 阶段 | 耗时/帧 | 说明 |
-|---|---|---|
-| 建图：2 cm 体素 KD-tree + 14 个边标量 | **68 ms** | 全部向量化。逐边 Python 循环的版本是 850 ms |
-| 模型前向（full，40k 参数） | 3 ms | 约 420 条边、70 个节点 |
-| 平均连接聚类 | 9 ms | 纯 Python |
-| **合计** | **80 ms** | FastSAM 前向 + 提升另计（与 ESAM 共用，约 0.7 s） |
+ESAM 的 merge 全是矩阵运算：G×G 的分数矩阵 + 匈牙利匹配。这里照同样思路改写：G≈70 个组，
+G×G 矩阵只有几千个元素，所有边特征都能写成 `one_hot(groups).T @ X` 和一次 `cdist` + `scatter`。
+`freesam3d/merging/infer.py::GroupMerger` 是单次调用的推理入口，RGB-D 进、实例 mask 出：
 
-边特征是建图时顺带算出的标量，模型只看 14 个数加一个 16 维投影。真正的开销在 KD-tree，与特征维度无关。
+| 阶段 | GPU（RTX 5090） | 旧 CPU 路径 | 做法 |
+|---|---|---|---|
+| FastSAM 前向 | 72 ms | 68 ms | 不变；特征图留在显存，不再拷到 CPU |
+| 互斥分组 + 反投影 + 20k 采样 + KMeans 补组 | **12 ms** | 170 ms | 互斥图 = 每像素取覆盖它的最小面积 mask（逐位一致，0.2 ms）；KMeans 用 GPU Lloyd（1 次 k-means++ 初始化，inertia 与 sklearn n_init=10 相差 ±5%，8 ms vs 140 ms） |
+| 逐点特征采样 + 组池化 | **1 ms** | 83 ms | `grid_sample` 在特征图所在设备上做（640 维图 65 ms → 0.7 ms） |
+| 邻接图 + 14 个边标量 | **8 ms** | 56 ms | 2 cm 体素子采样后 `cdist`（约 5k×5k）；min/count/mean/min 用 `scatter_reduce` 到 G×G |
+| GroupMergeNet 前向 | 2 ms | 2 ms | |
+| 平均连接聚类 | **3 ms** | 9 ms | 稠密 (G,G) 和/计数矩阵，每次合并是两行两列相加；torch 版反而 13 ms（kernel 启动开销），留在 CPU |
+| **合计** | **100 ms** | 365 ms | ESAM-E 的 3D 部分（不含 FastSAM）实测 110 ms/帧 |
+
+GPU 路径的边特征与 CPU 缓存逐列一致（均值/方差差异 <0.03），**训练好的模型不用重训**，
+val 平均最佳 IoU 0.632 vs 0.628。纯 CPU（8 线程）跑同一路径为 600 ms/帧，FastSAM 占 366 ms。
+
+CPU 参考实现（`graph.py`，KD-tree）保留为单元测试的对照；`configs/merge_net.yaml: graph.backend`
+和 `configs/query_lifting.yaml: lifting.fill_backend` 切换。
 优化记录：原始 mask 嵌套矩阵在 4× 下采样网格上算（误差 0.0014），从 130 ms 降到 10 ms。
 
 ## 3. 标签：purity 0.8 → 0.6
@@ -148,4 +159,5 @@ python tools/merge_probe.py --split val --gt 3d                # §1 的探针
 python tools/merge_train.py --kind full --tag full             # 约 2 min
 python tools/merge_eval.py --checkpoints edge_only geom_only full --tag eval_3d --gt 3d
 python tools/merge_visualize.py --checkpoint full --eval-tag eval_3d
+python tools/merge_benchmark.py --frames 60                   # 全 GPU 推理路径计时 + 与缓存路径对比
 ```

@@ -41,3 +41,13 @@ def test_runner_features_and_masks():
     for name, (_, stride, _) in FEATURE_SPECS.items():
         assert out.feature_maps[name].shape[-2:] == (H // stride, W // stride), name
     assert out.feature_maps['proto'].shape[1] == 32
+
+
+@pytest.mark.skipif(not (CKPT.exists() and FRAME.exists()), reason='FastSAM checkpoint / frame not available')
+def test_cpu_runner_does_not_clobber_cuda_visible_devices():
+    import os
+    from freesam3d.io.frames import load_npz_frame
+    from freesam3d.models.fastsam import FastSAMRunner
+    before = os.environ.get('CUDA_VISIBLE_DEVICES')
+    FastSAMRunner(CKPT, 'cpu', features=('proto',))(load_npz_frame(FRAME).rgb)
+    assert os.environ.get('CUDA_VISIBLE_DEVICES') == before
