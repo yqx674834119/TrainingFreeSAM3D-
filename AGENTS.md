@@ -26,6 +26,8 @@ TrainingFreeSAM3D/
 │   ├── evaluation/         #   实例层面的评估（IoU 匹配、class-agnostic AP、粒度诊断）
 │   ├── esam/               #   调用官方 ESAM 的桥接层：数据准备、导出预测
 │   │                       #     （只 import ESAM，不修改 ESAM 仓库的代码和数据）
+│   ├── merging/            #   GroupMergeNet：组邻接图(graph)、标签(labels)、缓存(cache)、
+│   │                       #     数据(data)、模型(model)、训练(train)、聚类(cluster)、评估(evaluate)、探针(probe)
 │   └── vis/                #   所有画图/导出 PLY 的代码
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）
@@ -48,6 +50,9 @@ TrainingFreeSAM3D/
 - 一次性调试脚本放在会话临时目录，不要提交到仓库根目录。
 - 需要跑官方 ESAM 时，通过 `freesam3d/esam/` 调用，数据根目录放在本项目的
   `work_dirs/esam_eval/` 下。不要往 `/home/yqx/SegmentAnything3D/ESAM/data` 里写东西。
+- 任何可训练模块：先写 `tools/*_probe.py` 回答「输入是否有信号」再训练；阈值只在留出的
+  训练场景上标定，验证集（16 个场景）只用于最终汇报。新的边/节点特征加在
+  `merging/graph.py` 的 `edge_feature_names()` / `NODE_GEOM` 中并同步更新测试。
 - 不复制第三方仓库或权重进本项目；外部路径（FastSAM 权重、ScanNet 原始数据、
   ESAM、Personalize-SAM）只在 `configs/*.yaml` 中引用。
 

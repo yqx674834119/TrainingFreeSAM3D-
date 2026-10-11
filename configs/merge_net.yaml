@@ -1,0 +1,63 @@
+# GroupMergeNet：把 FastSAM 分组合并到 ScanNet 实例粒度
+# 数据：用户下载的 ESAM 官方 ScanNet 2D 导出（逐帧 instance/label PNG），split 用 ESAM 官方列表
+dataset:
+  root: /media/yqx/Win10Pro X64/ditr_work_data/ESAM_datasets/scannet_2D_extracted/2D
+  train_list: /home/yqx/SegmentAnything3D/ESAM/data/scannet200/meta_data/scannetv2_train.txt
+  val_list: /home/yqx/SegmentAnything3D/ESAM/data/scannet200/meta_data/scannetv2_val.txt
+  frame_stride: 2                # 导出目录每 20 帧一张；2 => ESAM 的 40 帧间隔
+  train_frames_per_scene: 8      # 均匀抽取；0 = 全部
+  val_frames_per_scene: 0        # 验证场景用全部 40 帧间隔的帧
+  val_scenes:                    # 与 docs/esam_granularity.zh-CN.md 相同的 16 个验证场景
+    [scene0050_00, scene0084_00, scene0208_00, scene0328_00, scene0334_00, scene0412_00,
+     scene0414_00, scene0441_00, scene0488_00, scene0580_00, scene0593_00, scene0595_00,
+     scene0621_00, scene0663_00, scene0690_00, scene0693_00]
+  intrinsic: [577.870605, 577.870605, 319.5, 239.5]   # ESAM 统一深度内参 fx fy cx cy
+
+lifting_config: configs/query_lifting.yaml   # FastSAM 参数、20k 采样、KMeans 补组（与 ESAM 一致）
+feature: backbone            # 节点特征 + group_cos 用哪一层（640 维，stride 32）
+boundary_feature: proto      # 交界点局部对比用哪一层：必须是细分辨率层（proto: 32 维，stride 4）
+cache_root: work_dirs/merge_cache
+
+graph:
+  voxel: 0.02             # 建邻接图前体素化（米）；0 = 直接在 20k 点上查
+  adjacency_eps: 0.05     # 两组点距 < ε 视为相邻（米）
+  boundary_k: 32          # 每条边取最近的 k 对交界点算局部特征对比
+  feature_centering: true # 先减帧均值再 L2（见 README：FastSAM 特征有大公共分量）
+
+labels:
+  # 缓存里存的是每组的多数 GT 与 purity；训练时按下面的阈值选边。实测 purity 0.6 比 0.8
+  # 多拿到 75% 的标注边，且与严格标签的一致性为 100%（见 docs/merge_net.zh-CN.md）
+  purity: 0.6
+  min_labeled: 0.3
+
+model:
+  # 探针结论（docs/merge_net.zh-CN.md §1）：640 维特征只比 14 个边标量多 0.01 AUC，
+  # 所以默认用 edge_only；full / geom_only 保留作消融
+  kind: edge_only         # edge_only | geom_only | full
+  hidden: 32              # edge_only 的隐层；full/geom_only 用 64
+  feature_proj: 16
+  message_passing: 1
+  dropout: 0.1
+
+training:
+  epochs: 25
+  frames_per_step: 32
+  lr: 0.002
+  weight_decay: 0.0001
+  seed: 0
+  objectness_weight: 0.5  # 节点「是 thing 物体」头的 loss 权重（edge_only 没有该头）
+
+merge:
+  linkage: average        # average | single
+  threshold: null         # null = 在训练集上扫出 IoU 最优阈值并写入 checkpoint
+  # 输出 mask 的过滤（对应 ESAM 的 npoint_thr=100 / inst_score_thr=0.3）；只作用于模型输出
+  min_points: 100
+  # objectness 只用来给 mask 打分排序，不做硬过滤：在留出训练帧上扫过 min_score ∈ {0.3..0.7}，
+  # AP50 不升、IoU/召回下降（docs/merge_net.zh-CN.md §6），所以设 0
+  min_score: 0.0
+
+eval:
+  min_gt_points: 100
+  stuff_nyu40: [1, 2, 22]   # wall, floor, ceiling（NYU40 id），用于 2D PNG GT
+  stuff_raw: [1, 3, 41]     # wall, floor, ceiling（ScanNet raw id），用于 ESAM 3D GT
+  gt: 3d                    # 3d = ESAM 3D 传播的逐帧 GT（与 ESAM 粒度报告同协议）；2d = 数据集 instance PNG

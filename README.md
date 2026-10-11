@@ -9,7 +9,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 |---|---|---|
 | Query Lifting | `freesam3d/lifting/` | ✅ baseline 完成 |
 | Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
-| 轻量合并模型 GroupMergeNet | `freesam3d/merging/`（待建） | 📝 设计见 [docs/merge_net_design.zh-CN.md](docs/merge_net_design.zh-CN.md) |
+| 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
 | Query Merging（跨帧） | 待建 | — |
 
 环境：`source tools/env.sh`（venv + CUDA 动态链接，见 AGENTS.md §4）。
@@ -26,6 +26,20 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 ESAM 每个 mask 平均合并 7 个 FastSAM 组，解码器 77% 的提升来自整组合并。详见
 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md)；复现命令为
 `tools/esam_prepare.py`、`tools/esam_export.py`、`tools/esam_granularity.py`。
+
+## GroupMergeNet（摘要）
+
+40k 参数的边分类器 + objectness 头，在 ESAM 官方 1,201 个训练场景（8.8k 帧）上训练 2 分钟，
+判断相邻 FastSAM 组是否同一物体，再做平均连接聚类。同一 809 帧验证集、同一 3D GT：
+
+| | FastSAM | **GroupMergeNet** | Oracle-adj（上限） | ESAM-snap | ESAM |
+|---|---|---|---|---|---|
+| 平均最佳 IoU | 0.532 | **0.627** | 0.757 | 0.702 | 0.754 |
+| 召回@0.5 | 0.513 | **0.686** | 0.827 | 0.792 | 0.837 |
+| AP50 | 0.237 | **0.506** | 0.567 | 0.709 | 0.751 |
+
+推理 80 ms/帧（建图 68 + 模型 3 + 聚类 9）。训练前的探针、消融和失败分析见
+[docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)。
 
 ## 模块 1：Query Lifting
 
