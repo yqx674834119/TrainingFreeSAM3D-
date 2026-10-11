@@ -10,6 +10,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | Query Lifting | `freesam3d/lifting/` | ✅ baseline 完成 |
 | Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
 | 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
+| 提议打分（从 FastSAM mask 层级里选） | `freesam3d/merging/proposals.py`, `scorer.py` | ✅ 见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md) |
 | Query Merging（跨帧） | 待建 | — |
 | CVPR 投稿规划 | [docs/cvpr_plan.zh-CN.md](docs/cvpr_plan.zh-CN.md) | 📝 方法与实验设计初稿 |
 
@@ -42,6 +43,19 @@ ESAM 每个 mask 平均合并 7 个 FastSAM 组，解码器 77% 的提升来自�
 推理 100 ms/帧（FastSAM 72 + 合并模块 28，全部矩阵运算，无 KD-tree；ESAM-E 3D 部分 110 ms）。
 单次调用入口 `freesam3d/merging/infer.py::GroupMerger`。训练前的探针、消融和失败分析见
 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)。
+
+## 提议打分（摘要）
+
+FastSAM 的原始重叠 mask 本身是「部件 ⊂ 整体」的层级，整体 mask 常常已经在里面（每个 GT 的最佳
+原始 mask IoU 0.672，互斥组只有 0.508）。所以把问题从「合并碎片」改成「从候选里选」：候选 =
+原始 mask ∪ GroupMergeNet 合并 mask，一个 28k 参数的打分器预测每个候选的 IoU，再做 NMS：
+
+| | GroupMergeNet 合并 | **提议打分 + NMS，top-20** | ESAM-snap | ESAM |
+|---|---|---|---|---|
+| 平均最佳 IoU / 召回@0.5 | 0.627 / 0.686 | **0.688 / 0.793** | 0.702 / 0.792 | 0.754 / 0.837 |
+| AP50 / AP25 | 0.506 / 0.665 | **0.626 / 0.741** | 0.709 / 0.800 | 0.751 / 0.822 |
+
+细节、消融与剩余差距分解见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md)。
 
 ## 模块 1：Query Lifting
 

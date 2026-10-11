@@ -62,3 +62,11 @@ eval:
   stuff_nyu40: [1, 2, 22]   # wall, floor, ceiling（NYU40 id），用于 2D PNG GT
   stuff_raw: [1, 3, 41]     # wall, floor, ceiling（ScanNet raw id），用于 ESAM 3D GT
   gt: 3d                    # 3d = ESAM 3D 传播的逐帧 GT（与 ESAM 粒度报告同协议）；2d = 数据集 instance PNG
+
+# 提议打分（docs/mask_scorer.zh-CN.md）：候选 = FastSAM 原始重叠 mask ∪ GroupMergeNet 合并 mask，
+# 打分器预测每个候选与最佳 GT 的 IoU，再做嵌套 NMS。
+scorer:
+  checkpoint: work_dirs/mask_scorer/scorer/model.pt
+  nms_iou: 0.5
+  nms_contain: 1.01       # 1.01 = 不做包含抑制（部件与整体可同时输出，召回高）；0.8 = 抑制嵌套，mask 数减半
+  top_k: 20               # 与 ESAM 的 topk_insts 一致

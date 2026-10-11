@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from ..lifting.geometry import backproject_torch
 from ..lifting.grouping import exclusive_group_map_torch, kmeans_torch
@@ -25,6 +26,9 @@ from ..lifting.pooling import pool
 from ..models.fastsam import FastSAMRunner, sample_point_features
 from .cluster import merge_groups
 from .graph_gpu import build_graph_gpu
+from .proposal_data import ScalarStandardizer
+from .proposals_gpu import build_proposals_gpu, nested_nms_gpu
+from .scorer import MaskScorer
 from .train import load_checkpoint
 
 
@@ -33,17 +37,20 @@ class MergeResult:
     xyz: np.ndarray            # (N,3) sampled world points
     pixels: np.ndarray         # (N,2) (u,v)
     groups: np.ndarray         # (N,) FastSAM exclusive group id (after KMeans fill)
-    instances: np.ndarray      # (N,) merged instance id per point
+    instances: np.ndarray      # (N,) merged instance id per point (exclusive)
     instance_scores: np.ndarray  # (K,) objectness score per merged instance (index = instance id)
     edge_prob: np.ndarray      # (E,) merge probability per adjacency edge
     edges: np.ndarray          # (E,2)
     timing_ms: dict
+    masks: np.ndarray = None   # (P,N) bool: final proposal masks after scoring + nested NMS (may overlap)
+    mask_scores: np.ndarray = None  # (P,) predicted IoU per final mask
 
 
 class GroupMerger:
     """Frozen FastSAM + trained GroupMergeNet, end to end on one device."""
 
-    def __init__(self, lifting_cfg, merge_cfg, checkpoint, device='cuda'):
+    def __init__(self, lifting_cfg, merge_cfg, checkpoint, device='cuda', scorer_checkpoint=None,
+                 nms_iou=0.5, nms_contain=0.8, top_k=None):
         self.device = torch.device(device)
         fs = lifting_cfg['fastsam']
         feats = sorted({merge_cfg['feature'], merge_cfg['boundary_feature']})
@@ -56,6 +63,14 @@ class GroupMerger:
         self.threshold = merge_cfg['merge']['threshold'] or ck['threshold'] or 0.5
         self.linkage = merge_cfg['merge']['linkage']
         self.min_points = merge_cfg['merge'].get('min_points', 0)
+        self.scorer = None
+        if scorer_checkpoint is not None:
+            ck = torch.load(scorer_checkpoint, map_location=str(self.device), weights_only=False)
+            self.scorer = MaskScorer(ck['scalar_dim'], ck['feat_dim'], ck['hidden']).to(self.device).eval()
+            self.scorer.load_state_dict(ck['state_dict'])
+            self.scorer_std = ScalarStandardizer.from_state(ck['standardizer'])
+            self.scorer_feat = ck['feat_dim'] > 0
+            self.nms_iou, self.nms_contain, self.top_k = nms_iou, nms_contain, top_k
 
     @torch.inference_mode()
     def __call__(self, rgb, depth, intrinsic, pose_c2w, seed=0):
@@ -121,7 +136,26 @@ class GroupMerger:
         drop = counts < self.min_points
         score[drop] = -1.0
         t['cluster'] = _tock(s)
-        return MergeResult(xyz.cpu().numpy(), px_np, groups_np, inst, score, prob, graph.edges, t)
+        res = MergeResult(xyz.cpu().numpy(), px_np, groups_np, inst, score, prob, graph.edges, t)
+        if self.scorer is not None:
+            s = _tick()
+            merged_t = torch.as_tensor(node_inst, device=self.device)[groups]          # (N,) instance per point
+            merged_masks = F.one_hot(merged_t, int(node_inst.max()) + 1).T.bool()         # (K,N) on device
+            raw_pts = masks[:, px[:, 1], px[:, 0]]
+            P = build_proposals_gpu(xyz, groups, graph.node_feat, pf[self.boundary_feature], raw_pts, out.scores,
+                                    mask_index, obj, merged_masks, self.min_points, device=str(self.device))
+            if len(P.masks):
+                X = self.scorer_std.apply(torch.as_tensor(P.scalars, device=self.device))
+                Fe = torch.as_tensor(P.feat, device=self.device)
+                sc = self.scorer.score(X, Fe if self.scorer_feat else Fe[:, :0]).cpu().numpy()
+                keep = nested_nms_gpu(P.masks, sc, self.nms_iou, self.nms_contain, str(self.device))
+                if self.top_k:
+                    keep = keep[:self.top_k]
+                res.masks, res.mask_scores = P.masks[keep], sc[keep]
+            else:
+                res.masks, res.mask_scores = np.zeros((0, len(res.xyz)), bool), np.zeros(0)
+            t['proposals+scorer+nms'] = _tock(s)
+        return res
 
 
 def _tick():

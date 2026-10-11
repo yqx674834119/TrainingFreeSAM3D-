@@ -163,3 +163,64 @@ def test_gpu_exclusive_map_and_backproject_match_numpy():
     xyz_t, px_t = backproject_torch(depth, K, pose)
     np.testing.assert_allclose(xyz, xyz_t.cpu().numpy(), atol=1e-4)
     assert np.array_equal(px, px_t.cpu().numpy())
+
+
+def test_proposals_and_nested_nms():
+    from freesam3d.merging.proposals import NUM_SCALARS, build_proposals, nested_nms, proposal_targets, scalar_names
+    assert len(scalar_names()) == NUM_SCALARS
+    rng = np.random.default_rng(0)
+    n = 600
+    xyz = rng.uniform(0, 1, (n, 3)).astype(np.float32)
+    groups = np.repeat([0, 1, 2], 200)
+    gfeat = np.eye(3, dtype=np.float32)
+    proto = rng.normal(size=(n, 4)).astype(np.float32)
+    whole = np.zeros(n, bool); whole[:400] = True            # raw mask 0 = groups 0+1 (the "object")
+    part = np.zeros(n, bool); part[:200] = True              # raw mask 1 = group 0 (a part, nested in 0)
+    other = np.zeros(n, bool); other[400:] = True            # raw mask 2 = group 2
+    raw = np.stack([whole, part, other])
+    P = build_proposals(xyz, groups, gfeat, proto, raw, np.array([0.9, 0.8, 0.7], np.float32),
+                        np.array([1, 2, -1]), np.array([0.9, 0.9, 0.1]), merged_masks=np.stack([whole]), min_points=50)
+    assert P.masks.shape == (4, n) and P.scalars.shape == (4, NUM_SCALARS) and P.is_raw.tolist() == [True, True, True, False]
+    names = scalar_names()
+    s = {nm: P.scalars[:, i] for i, nm in enumerate(names)}
+    assert s['n_groups'].tolist() == [2, 1, 1, 2]
+    assert s['n_child'][0] == 1 and s['n_parent'][1] == 1 and s['n_raw_inside'][3] == 2   # merged copy contains raw 0 and 1
+    gt = np.repeat([7, 7, 9], 200)
+    iou, best = proposal_targets(P.masks, gt)
+    np.testing.assert_allclose(iou, [1.0, 0.5, 1.0, 1.0]) and best.tolist() == [7, 7, 9, 7]
+    # nested NMS: whole (score .9) suppresses its part (.8) and its duplicate (.95 wins as top) -> keep {dup, other}
+    keep = nested_nms(P.masks, np.array([0.9, 0.8, 0.7, 0.95]))
+    assert sorted(keep.tolist()) == [2, 3]
+
+
+def test_mask_scorer_forward_shapes():
+    from freesam3d.merging.scorer import MaskScorer
+    from freesam3d.merging.proposals import NUM_SCALARS
+    m = MaskScorer(NUM_SCALARS, 8, hidden=16).eval()
+    s = m.score(torch.randn(5, NUM_SCALARS), torch.randn(5, 8))
+    assert s.shape == (5,) and (s >= 0).all() and (s <= 1).all()
+    m0 = MaskScorer(NUM_SCALARS, 0, hidden=16).eval()
+    assert m0.score(torch.randn(5, NUM_SCALARS), torch.randn(5, 0)).shape == (5,)
+
+
+def test_gpu_proposals_match_cpu():
+    if not HAS_CUDA:
+        pytest.skip('no CUDA')
+    from freesam3d.merging.proposals import build_proposals, nested_nms
+    from freesam3d.merging.proposals_gpu import build_proposals_gpu, nested_nms_gpu
+    rng = np.random.default_rng(1)
+    n, G = 2000, 6
+    xyz = rng.uniform(0, 2, (n, 3)).astype(np.float32)
+    groups = rng.integers(0, G, n)
+    gfeat = rng.normal(size=(G, 8)).astype(np.float32)
+    proto = rng.normal(size=(n, 4)).astype(np.float32)
+    raw = np.stack([np.isin(groups, s) for s in ([0, 1], [0], [2, 3, 4], [3], [5], [1])])
+    merged = np.stack([np.isin(groups, [0, 1, 2]), np.isin(groups, [5])])
+    args = (xyz, groups, gfeat, proto, raw, rng.random(6).astype(np.float32), np.array([1, 0, 3, -1, 4, 5]), rng.random(G).astype(np.float32))
+    c = build_proposals(*args, merged_masks=merged, min_points=50)
+    g = build_proposals_gpu(*args, merged_masks=merged, min_points=50)
+    assert np.array_equal(c.masks, g.masks) and np.array_equal(c.is_raw, g.is_raw) and np.array_equal(c.source_index, g.source_index)
+    np.testing.assert_allclose(c.scalars, g.scalars, rtol=1e-3, atol=2e-3)
+    np.testing.assert_allclose(c.feat, g.feat, atol=1e-4)
+    s = rng.random(len(c.masks))
+    assert nested_nms(c.masks, s).tolist() == nested_nms_gpu(g.masks, s).tolist()

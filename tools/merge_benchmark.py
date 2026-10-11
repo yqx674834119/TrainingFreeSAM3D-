@@ -25,10 +25,14 @@ def main():
     p.add_argument('--checkpoint', default='full')
     p.add_argument('--frames', type=int, default=50)
     p.add_argument('--device', default='cuda')
+    p.add_argument('--scorer', default=None, help='mask-scorer tag under work_dirs/mask_scorer/ (adds proposals + NMS stage)')
     a = p.parse_args()
     cfg = load_config(resolve_path(a.config))
     lc = load_config(resolve_path(cfg['lifting_config']))
-    merger = GroupMerger(lc, cfg, resolve_path('work_dirs/merge_net') / a.checkpoint / 'model.pt', a.device)
+    sc = resolve_path('work_dirs/mask_scorer') / a.scorer / 'model.pt' if a.scorer else None
+    scfg = cfg.get('scorer', {})
+    merger = GroupMerger(lc, cfg, resolve_path('work_dirs/merge_net') / a.checkpoint / 'model.pt', a.device, sc,
+                         scfg.get('nms_iou', 0.5), scfg.get('nms_contain', 0.8), scfg.get('top_k'))
     files = list_cache(resolve_path(cfg['cache_root']) / 'val')
     files = files[:: max(1, len(files) // a.frames)][:a.frames]
     cached = FrameSet(files, keep_points=True).frames
@@ -52,6 +56,8 @@ def main():
             gts = GTSet.from_labels(gt, keep)
             m, _ = groups_to_masks(res.instances)
             ious['gpu path'].append(coverage_stats(m, gts)['mean_best_iou'])
+            if res.masks is not None and len(res.masks):
+                ious.setdefault('gpu path + scorer (proposals)', []).append(coverage_stats(res.masks, gts)['mean_best_iou'])
             prob = predict_frame(merger.model, merger.std, fr, a.device)
             m2, _ = groups_to_masks(merge_groups(fr['groups'], fr['edges'], prob, merger.threshold, merger.linkage))
             gt2 = fr['gt_instance_3d']

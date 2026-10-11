@@ -28,7 +28,9 @@ TrainingFreeSAM3D/
 │   │                       #     （只 import ESAM，不修改 ESAM 仓库的代码和数据）
 │   ├── merging/            #   GroupMergeNet：组邻接图(graph=CPU 参考, graph_gpu=矩阵版)、标签(labels)、
 │   │                       #     缓存(cache)、数据(data)、模型(model)、训练(train)、聚类(cluster)、
-│   │                       #     评估(evaluate)、探针(probe)、单次推理入口(infer)
+│   │                       #     评估(evaluate)、探针(probe)、单次推理入口(infer)、
+│   │                       #     提议候选+嵌套 NMS(proposals=CPU 参考, proposals_gpu=矩阵版)、
+│   │                       #     mask 质量打分器(scorer, proposal_data)
 │   └── vis/                #   所有画图/导出 PLY 的代码
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）
