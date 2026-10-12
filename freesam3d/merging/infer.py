@@ -10,6 +10,8 @@ This is the deployable counterpart of ESAM's per-frame decoder + post-processing
       -> adjacency graph + 14 edge scalars (cdist + scatter, ~7 ms)
       -> GroupMergeNet                  (~2 ms)
       -> average-linkage clustering     (CPU, ~5 ms; G ≈ 70 nodes)
+      -> proposals + MaskScorer + NMS   (optional, ~3 ms)
+      -> QueryMemory.update             (optional cross-frame scene queries, ~10 ms; streaming/memory.py)
 
 No KD-tree, no sklearn, no per-edge Python loop. The only CPU step left is the
 final agglomeration over ~70 nodes / ~400 edges.
@@ -44,14 +46,17 @@ class MergeResult:
     timing_ms: dict
     masks: np.ndarray = None   # (P,N) bool: final proposal masks after scoring + nested NMS (may overlap)
     mask_scores: np.ndarray = None  # (P,) predicted IoU per final mask
+    matched_query: np.ndarray = None  # (P,) memory query matched per final mask (-1 new / not admitted); only with a memory
 
 
 class GroupMerger:
     """Frozen FastSAM + trained GroupMergeNet, end to end on one device."""
 
     def __init__(self, lifting_cfg, merge_cfg, checkpoint, device='cuda', scorer_checkpoint=None,
-                 nms_iou=0.5, nms_contain=0.8, top_k=None):
+                 nms_iou=0.5, nms_contain=0.8, top_k=None, memory=None):
         self.device = torch.device(device)
+        self.memory = memory               # optional freesam3d.streaming.memory.QueryMemory (cross-frame scene queries)
+        self.frame_counter = 0
         fs = lifting_cfg['fastsam']
         feats = sorted({merge_cfg['feature'], merge_cfg['boundary_feature']})
         self.runner = FastSAMRunner(fs['checkpoint'], str(self.device), fs['imgsz'], fs['conf'], fs['iou'],
@@ -73,7 +78,7 @@ class GroupMerger:
             self.nms_iou, self.nms_contain, self.top_k = nms_iou, nms_contain, top_k
 
     @torch.inference_mode()
-    def __call__(self, rgb, depth, intrinsic, pose_c2w, seed=0):
+    def __call__(self, rgb, depth, intrinsic, pose_c2w, seed=0, frame_id=None):
         t = {}
         s = _tick()
         out = self.runner(rgb)                                           # masks (M,H,W) np.bool, maps on device
@@ -155,6 +160,20 @@ class GroupMerger:
             else:
                 res.masks, res.mask_scores = np.zeros((0, len(res.xyz)), bool), np.zeros(0)
             t['proposals+scorer+nms'] = _tock(s)
+        if self.memory is not None and res.masks is not None:
+            s = _tick()
+            # un-centred pooled backbone feature per final mask (mask -> group weights @ group feature), the input
+            # the cross-frame projection head was trained on; node_feat is frame-centred and is not used here
+            onehot = F.one_hot(groups, len(uniq)).float()
+            w = torch.as_tensor(res.masks, device=self.device).float() @ onehot
+            w = w / w.sum(1, keepdim=True).clamp_min(1)
+            feat_raw = F.normalize(w @ F.normalize(torch.as_tensor(gf, device=self.device).float(), dim=1), dim=1)
+            from ..streaming.memory import FrameInput
+            fid = self.frame_counter if frame_id is None else int(frame_id)
+            res.matched_query = self.memory.update(FrameInput(res.xyz, res.masks, res.mask_scores.astype(np.float32),
+                                                              feat_raw.cpu().numpy(), fid))
+            self.frame_counter += 1
+            t['memory'] = _tock(s)
         return res
 
 

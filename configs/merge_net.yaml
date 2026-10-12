@@ -70,3 +70,16 @@ scorer:
   nms_iou: 0.5
   nms_contain: 1.01       # 1.01 = 不做包含抑制（部件与整体可同时输出，召回高）；0.8 = 抑制嵌套，mask 数减半
   top_k: 20               # 与 ESAM 的 topk_insts 一致
+
+# 流式场景级 Query Memory（docs/streaming.zh-CN.md，对标 ESAM OnlineMerge）：每帧的最终 mask 进入
+# 体素占用记忆，跨帧匹配分 = max(包含度) × 投影特征余弦，匈牙利指派；记忆大小随场景体积而非帧数增长。
+streaming:
+  voxel: 0.05               # 记忆体素（米）；3 cm / 8 cm 都更差（消融见文档）
+  match_score: contain_x_feat   # max_contain = 纯几何规则；contain_x_feat = 几何 × 投影特征余弦
+  match_threshold: 0.3
+  match_dilation: 1         # 匹配前把记忆侧体素膨胀 1 格，容忍视角间一格的偏移
+  admit_score: 0.3          # 新 query 的提议分数门槛
+  nms_contain: 0.8          # 进入记忆前的逐帧嵌套 NMS 包含阈值：比逐帧评估的 1.01 严，去掉部件/整体重复
+  top_k: 20
+  projection: work_dirs/stream/projection/proj/model.pt   # 跨帧特征投影头（640→512→128，InfoNCE，对标 ESAM MergeHead）
+  segment_smooth: true      # 评估时按 ESAM 做 mesh-segment 平滑（ESAM 导出的 scene_masks 也是平滑后的）

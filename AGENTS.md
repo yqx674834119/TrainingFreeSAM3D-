@@ -31,6 +31,9 @@ TrainingFreeSAM3D/
 │   │                       #     评估(evaluate)、探针(probe)、单次推理入口(infer)、
 │   │                       #     提议候选+嵌套 NMS(proposals=CPU 参考, proposals_gpu=矩阵版)、
 │   │                       #     mask 质量打分器(scorer, proposal_data)
+│   ├── streaming/          #   流式场景级 Query Memory（对标 ESAM OnlineMerge）：体素哈希与稀疏交并(voxel)、
+│   │                       #     QueryMemory(memory)、跨帧特征投影头(projection)、匹配打分器(matcher)、
+│   │                       #     场景级评估与 mesh-segment 平滑(evaluate)
 │   └── vis/                #   所有画图/导出 PLY 的代码
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）

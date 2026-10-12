@@ -26,15 +26,33 @@ def main():
     p.add_argument('--frames', type=int, default=50)
     p.add_argument('--device', default='cuda')
     p.add_argument('--scorer', default=None, help='mask-scorer tag under work_dirs/mask_scorer/ (adds proposals + NMS stage)')
+    p.add_argument('--memory', default=None,
+                   help='ProjectionHead tag under work_dirs/stream/projection/: attach a QueryMemory and time its update '
+                        '(runs --frames consecutive frames of one scene so the memory grows; needs --scorer)')
     a = p.parse_args()
     cfg = load_config(resolve_path(a.config))
     lc = load_config(resolve_path(cfg['lifting_config']))
     sc = resolve_path('work_dirs/mask_scorer') / a.scorer / 'model.pt' if a.scorer else None
     scfg = cfg.get('scorer', {})
+    mem = None
+    nms_contain = scfg.get('nms_contain', 0.8)
+    if a.memory:
+        from freesam3d.streaming.memory import MemoryConfig, QueryMemory
+        from freesam3d.streaming.projection import load_projection
+        st = cfg.get('streaming', {})
+        proj = load_projection(resolve_path('work_dirs/stream/projection') / a.memory / 'model.pt', a.device)
+        mem = QueryMemory(MemoryConfig(voxel=st.get('voxel', 0.05), match_score=st.get('match_score', 'contain_x_feat'),
+                                       match_threshold=st.get('match_threshold', 0.3), match_dilation=st.get('match_dilation', 1),
+                                       admit_score=st.get('admit_score', 0.3)), device=a.device, projection=proj)
+        nms_contain = st.get('nms_contain', nms_contain)      # the memory wants the stricter per-frame NMS
     merger = GroupMerger(lc, cfg, resolve_path('work_dirs/merge_net') / a.checkpoint / 'model.pt', a.device, sc,
-                         scfg.get('nms_iou', 0.5), scfg.get('nms_contain', 0.8), scfg.get('top_k'))
+                         scfg.get('nms_iou', 0.5), nms_contain, scfg.get('top_k'), memory=mem)
     files = list_cache(resolve_path(cfg['cache_root']) / 'val')
-    files = files[:: max(1, len(files) // a.frames)][:a.frames]
+    if mem is not None:                                   # one scene in frame order, so the memory actually grows
+        scene0 = files[0].stem.rsplit('_', 1)[0]
+        files = sorted([f for f in files if f.stem.rsplit('_', 1)[0] == scene0], key=lambda q: int(q.stem.rsplit('_', 1)[1]))[:a.frames]
+    else:
+        files = files[:: max(1, len(files) // a.frames)][:a.frames]
     cached = FrameSet(files, keep_points=True).frames
     root = Path(cfg['dataset']['root'])
     stuff = set(cfg['eval']['stuff_raw'])
@@ -45,7 +63,7 @@ def main():
     for f, fr in zip(files, cached):
         scene, fid = f.stem.rsplit('_', 1)
         frame, _ = load_frame(root, scene, int(fid), cfg['dataset']['intrinsic'])
-        res = merger(frame.rgb, frame.depth, frame.intrinsic, frame.pose_c2w)
+        res = merger(frame.rgb, frame.depth, frame.intrinsic, frame.pose_c2w, frame_id=int(fid))
         times.append(res.timing_ms)
         # GT for the new sample: nearest cached point (same frame, same pose)
         _, idx = cKDTree(fr['xyz']).query(res.xyz, k=1)
@@ -67,7 +85,10 @@ def main():
     mean['total'] = float(sum(mean.values()))
     report = dict(device=a.device, frames=len(times), timing_ms=mean, params=merger.model.num_params(),
                   mean_best_iou={k: float(np.mean(v)) for k, v in ious.items()})
-    out = resolve_path('work_dirs/merge_net/benchmark.json')
+    if mem is not None:
+        report['memory'] = dict(projection=a.memory, queries=mem.num_queries, records=mem.num_records,
+                                scene_voxels=int(len(mem.scene_voxels)), projection_params=proj.num_params())
+    out = resolve_path('work_dirs/merge_net/benchmark_memory.json' if mem is not None else 'work_dirs/merge_net/benchmark.json')
     out.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
 

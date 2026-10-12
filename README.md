@@ -11,7 +11,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
 | 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
 | 提议打分（从 FastSAM mask 层级里选） | `freesam3d/merging/proposals.py`, `scorer.py` | ✅ 见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md) |
-| Query Merging（跨帧） | 待建 | — |
+| Query Merging（跨帧，流式 Query Memory） | `freesam3d/streaming/` | ✅ 见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md) |
 | CVPR 投稿规划 | [docs/cvpr_plan.zh-CN.md](docs/cvpr_plan.zh-CN.md) | 📝 方法与实验设计初稿 |
 
 环境：`source tools/env.sh`（venv + CUDA 动态链接，见 AGENTS.md §4）。
@@ -56,6 +56,22 @@ FastSAM 的原始重叠 mask 本身是「部件 ⊂ 整体」的层级，整体 
 | AP50 / AP25 | 0.506 / 0.665 | **0.626 / 0.741** | 0.709 / 0.800 | 0.751 / 0.822 |
 
 细节、消融与剩余差距分解见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md)。
+
+## 流式 Query Memory（摘要）
+
+逐帧的最终 mask 进入一张按 5 cm 体素去重的稀疏 (体素, query) 记忆（对标 ESAM `OnlineMerge`，但大小随
+场景体积而非帧数增长）：跨帧匹配分 = max 包含度 × 投影特征余弦（投影头 395k 参数，InfoNCE，对标 ESAM
+的 MergeHead），匈牙利指派，入库门槛，重叠合并。16 个验证场景、ESAM 的网格顶点与 GT，两边都做 ESAM 的
+mesh-segment 平滑：
+
+| | 逐帧堆叠（无记忆） | 记忆，纯几何 | **记忆 + 投影特征** | GT 提议上限 | ESAM-E |
+|---|---|---|---|---|---|
+| AP50 / AP25 | 0.080 / 0.265 | 0.272 / 0.450 | **0.365 / 0.511** | 0.513 / 0.645 | 0.589 / 0.722 |
+| 平均最佳 IoU / 召回@0.5 | 0.402 / 0.357 | 0.436 / 0.436 | **0.458 / 0.498** | 0.567 / 0.647 | 0.691 / 0.726 |
+
+记忆每场景约 37 个 query、2.6 万条记录（ESAM 的 `cur_masks` 为 K × 20000 × 帧数 位），update 7.6 ms/帧，
+整条流水线 98.8 ms/帧（`tools/merge_benchmark.py --memory proj`）。差距主要来自逐帧提议质量（GT 提议喂
+同一记忆 0.513）；设计、消融与差距分析见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md)。
 
 ## 模块 1：Query Lifting
 
@@ -155,3 +171,8 @@ GT 的取法和 ESAM 一致：每个点取最近 mesh 顶点的实例，再用�
 - 随机性：采样和 KMeans 都固定 `seed`（ESAM 未固定）。
 - GT KNN：用 `scipy.cKDTree`，ESAM 用 `pointops.knn_query`，结果等价。
 - 和 ESAM 一样，把 640×480 彩色图与深度视为逐像素对齐，没有补偿彩色/深度相机外参。
+- 跨帧记忆（`freesam3d/streaming/`）：ESAM 存所有帧的点级 mask（(K, 20000·F)）并在最后 KNN 到网格；
+  本项目存 5 cm 体素占用的稀疏 (体素, query) 表，渲染时把网格顶点量化查表。匹配分用 max 包含度 ×
+  投影特征余弦（ESAM：MergeHead 余弦 × bbox IoU），新 query 有入库门槛，维护阶段合并体素 IoU > 0.5
+  的 query（ESAM 只截 top-K）。进记忆前的逐帧 NMS 包含阈值 0.8（逐帧评估用 1.01）。评估时同样做
+  ESAM 的 mesh-segment 平滑（`streaming/evaluate.py::segment_smooth`）。
