@@ -49,6 +49,8 @@ def main():
     p.add_argument('--nms-iou', type=float, default=0.5)
     p.add_argument('--segment-smooth', action='store_true',
                    help='also report the memory masks after ESAM mesh-segment smoothing (super_points of the scene)')
+    p.add_argument('--ply', action='store_true',
+                   help='write work_dirs/stream/<tag>/ply/<scene>_compare.{ply,png}: RGB | GT | memory | ESAM side by side')
     p.add_argument('--projection', default=None, help='ProjectionHead tag under work_dirs/stream/projection/')
     p.add_argument('--feat-weight', type=float, default=1.0)
     p.add_argument('--match-dilation', type=int, default=1)
@@ -89,7 +91,8 @@ def main():
     rows = []
     for scene in scenes:
         fs = sorted(by_scene[scene], key=lambda q: int(q.stem.rsplit('_', 1)[1]))
-        mesh = np.fromfile(ws / 'data/scannet200/points' / f'{scene}.bin', np.float32).reshape(-1, 6)[:, :3]
+        mesh6 = np.fromfile(ws / 'data/scannet200/points' / f'{scene}.bin', np.float32).reshape(-1, 6)
+        mesh = mesh6[:, :3]
         mesh_gt = np.fromfile(ws / 'data/scannet200/instance_mask' / f'{scene}.bin', np.int64)
         mesh_sem = np.fromfile(ws / 'data/scannet200/semantic_mask' / f'{scene}.bin', np.int64)
         gts = mesh_gtset(mesh_gt, mesh_sem, stuff, cfg['eval']['min_gt_points'])
@@ -123,14 +126,26 @@ def main():
         if a.segment_smooth:
             sp = np.fromfile(ws / 'data/scannet200/super_points' / f'{scene}.bin', np.int64)
             assert len(sp) == len(mesh), (scene, len(sp), len(mesh))
-            row['memory_smooth'] = scene_metrics(segment_smooth(masks, sp, device=dev), scores, gts)
+            smooth = segment_smooth(masks, sp, device=dev)
+            row['memory_smooth'] = scene_metrics(smooth, scores, gts)
         if not a.no_baseline:
             bm, bs = stack_frames_baseline(frames, mesh, a.voxel)
             row['stack_frames'] = scene_metrics(bm, bs, gts)
         esam = ws / 'predictions' / f'{scene}.npz'
-        if esam.exists():
-            z = np.load(esam)
+        z = np.load(esam) if esam.exists() else None
+        if z is not None:
             row['esam'] = scene_metrics(z['scene_masks'], z['scene_scores'], gts)
+        if a.ply:
+            from freesam3d.vis.streaming import write_scene_comparison
+            pdir = out / 'ply'
+            pdir.mkdir(exist_ok=True)
+            paths, st = write_scene_comparison(pdir / scene, mesh, mesh6[:, 3:6], gts,
+                                               smooth if a.segment_smooth else masks, scores,
+                                               z['scene_masks'] if z is not None else None,
+                                               z['scene_scores'] if z is not None else None,
+                                               cfg['eval']['min_gt_points'])
+            row['ply'] = dict(paths=paths, **st)
+            print(f'  wrote {paths[0]} (+{len(paths) - 1} files) {st}', flush=True)
         rows.append(row)
         print(f"{scene}: {len(fs)} frames, {mem.num_queries} queries, {mem.num_records} records, update {row['update_ms']:.1f} ms | "
               f"memory AP50 {row['memory']['ap50']:.3f} IoU {row['memory']['iou']:.3f}"

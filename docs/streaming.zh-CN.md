@@ -141,7 +141,15 @@ python tools/stream_train_projection.py --tag proj --epochs 40 --max-gap 3
 python tools/stream_eval.py --scorer scorer --projection proj --match-score contain_x_feat \
     --match-dilation 1 --nms-contain 0.8 --segment-smooth --tag final_proj_nms08
 python tools/merge_benchmark.py --scorer scorer --memory proj --frames 60
+python tools/stream_eval.py --scorer scorer --projection proj --match-score contain_x_feat --match-dilation 1 \
+    --nms-contain 0.8 --segment-smooth --no-baseline --ply --scenes scene0593_00 scene0488_00 --tag ply_demo
 ```
+
+`--ply` 在 `work_dirs/stream/<tag>/ply/` 写每个场景的 `<scene>_compare.ply`（同一网格并排四份：RGB | GT thing
+实例 | 记忆（平滑后）| ESAM；预测 mask 用它匹配到的 GT（IoU ≥ 0.25）的颜色，没匹配到的用独立颜色，
+没被任何 mask 覆盖的顶点为灰）、`<scene>_compare.png` 俯视图，以及四个面板各自的 PLY（`freesam3d/vis/streaming.py`）。
+scene0593_00 是记忆最好的场景（平滑后 AP50 0.678 vs ESAM 0.800），scene0488_00 是差距最大的（0.150 vs 0.875，
+只有 15 帧，17 个 GT 对 17 个 query，mean best IoU 0.36：主要是提议把相邻物体连在一起）。
 
 ## 4. 匹配打分器（MatchScorer）为什么没用上
 

@@ -142,3 +142,19 @@ def test_segment_smooth_is_per_segment_majority():
     ref = np.array([[1, 1, 1, 0, 0, 0, 0, 0], [0, 0, 0, 1, 1, 1, 1, 1]], bool)   # 2/3 -> whole segment, 1/3 -> none
     assert np.array_equal(segment_smooth(masks, seg), ref)
     assert segment_smooth(np.zeros((0, 8), bool), seg).shape == (0, 8)
+
+
+def test_vis_pred_colors_follow_the_matched_gt():
+    from freesam3d.evaluation.instance import GTSet
+    from freesam3d.vis.streaming import BACKGROUND, gt_panel, paint_masks, pred_colors
+    gts = GTSet.from_labels(np.array([1, 1, 1, 1, 2, 2, 2, 2, 0, 0]))
+    gt_col, img = gt_panel(gts)
+    assert img.shape == (10, 3) and np.allclose(img[8], BACKGROUND)            # unlabeled -> background grey
+    masks = np.array([[1, 1, 1, 0, 0, 0, 0, 0, 0, 0],                           # GT 1, IoU 0.75
+                      [0, 0, 0, 0, 1, 1, 1, 1, 0, 0],                           # GT 2, IoU 1
+                      [0, 0, 0, 0, 0, 0, 0, 0, 1, 1]], bool)                    # only unlabeled points -> no match
+    col, ok = pred_colors(masks, gts, gt_col)
+    assert ok.tolist() == [True, True, False]
+    assert np.allclose(col[0], gt_col[0]) and np.allclose(col[1], gt_col[1])
+    painted = paint_masks(masks, np.array([0.9, 0.5, 0.1]), col, 10)
+    assert np.allclose(painted[0], gt_col[0]) and np.allclose(painted[4], gt_col[1]) and np.allclose(painted[3], BACKGROUND)
