@@ -1,0 +1,397 @@
+<title>Granularity Alignment</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700&family=Source+Sans+3:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a printable figure sheet — one plate per claim, caption under each, numbers in mono. */
+:root{
+  --bg:#f5f6f8; --surface:#ffffff; --ink:#14171c; --ink-2:#5a616b; --rule:#dce0e6; --tint:#eef0f3;
+  --ours:#0f8a6a; --frozen:#3d5fd9; --raw:#b06a00; --bad:#a4361f;
+  --f-display:"Archivo","Helvetica Neue",Arial,sans-serif;
+  --f-body:"Source Sans 3","Segoe UI",Roboto,sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#14171c; --surface:#1c2027; --ink:#e8eaee; --ink-2:#a2a8b3; --rule:#2d333d; --tint:#232831; color-scheme:dark } }
+:root[data-theme="dark"]{ --bg:#14171c; --surface:#1c2027; --ink:#e8eaee; --ink-2:#a2a8b3; --rule:#2d333d; --tint:#232831; color-scheme:dark }
+
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.55;margin:0}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:20px;padding-block:32px 64px}
+header{border-bottom:1px solid var(--rule);padding-bottom:20px;margin-bottom:28px}
+.eyebrow{font-family:var(--f-mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+h1{font-family:var(--f-display);font-weight:700;font-size:clamp(26px,3.6vw,38px);line-height:1.15;margin:.3em 0 .35em;text-wrap:balance}
+.thesis{font-size:18px;max-width:62ch;margin:0 0 10px}
+.meta{font-family:var(--f-mono);font-size:12.5px;color:var(--ink-2)}
+.legend{display:flex;flex-wrap:wrap;gap:14px 22px;margin-top:14px;font-size:14px}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.sw{width:14px;height:14px;border-radius:3px;display:inline-block}
+
+figure{margin:0 0 40px;background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:18px 18px 14px}
+.plate{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.plate h2{font-family:var(--f-display);font-weight:700;font-size:19px;margin:0}
+.badge{font-family:var(--f-mono);font-size:11px;letter-spacing:.04em;padding:2px 8px;border-radius:999px;border:1px solid var(--rule);color:var(--ink-2)}
+.badge.meas{border-color:var(--ours);color:var(--ours)}
+.badge.plan{border-color:var(--raw);color:var(--raw)}
+.scroll{overflow-x:auto}
+svg{display:block;max-width:100%;height:auto;font-family:var(--f-body)}
+svg text{fill:currentColor}
+svg .mono{font-family:var(--f-mono)}
+svg .dim{fill:var(--ink-2)}
+figcaption{font-size:14.5px;color:var(--ink);margin-top:12px;max-width:80ch}
+figcaption b{font-weight:600}
+.src{font-family:var(--f-mono);font-size:12px;color:var(--ink-2);margin-top:6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+table{border-collapse:collapse;font-size:14px;margin-top:8px;font-variant-numeric:tabular-nums}
+th,td{padding:5px 10px;border-bottom:1px solid var(--rule);text-align:left}
+th{font-weight:600;color:var(--ink-2);font-family:var(--f-mono);font-size:12px}
+td.n{font-family:var(--f-mono);text-align:right}
+@media print{body{background:#fff}figure{break-inside:avoid;border-color:#bbb}}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">CVPR plan v2 · 原理图 · TrainingFreeSAM3D</div>
+  <h1>Segment Anything, at Any Granularity</h1>
+  <p class="thesis">分割基础模型没有答错，它答在了另一个粒度上。粒度对齐是 3D 实例分割误差的主导项，并且不需要训练就能解。</p>
+  <div class="meta">已测数字均来自协议 A：16 个 ScanNet 验证场景 / 809 帧 / ESAM 3D 传播 GT / thing ≥100 点。标「预期」的图是设计意图。</div>
+  <div class="legend">
+    <span><i class="sw" style="background:var(--raw)"></i>冻结 VFM 的原始输出（部件粒度）</span>
+    <span><i class="sw" style="background:var(--frozen)"></i>训练版方法 ESAM</span>
+    <span><i class="sw" style="background:var(--ours)"></i>本文算子 / 上界</span>
+  </div>
+</header>
+
+<!-- ============ Fig 1 ============ -->
+<figure>
+  <div class="plate"><h2>图 1 · 模型没有答错，它答在另一个粒度上</h2><span class="badge meas">已测</span></div>
+  <div class="scroll">
+  <svg viewBox="0 0 980 300" role="img" aria-label="左：FastSAM 把一把椅子切成座面、靠背和腿；中：数据集把它标成一个物体；右：掩码固定、只改分组，IoU 从 0.532 升到 0.784，而只合并相邻组的上界 0.769 已高于训练版 ESAM 的 0.754">
+    <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- panel 1: parts -->
+    <text x="20" y="26" font-size="13" font-weight="600">FastSAM 输出：6 个 mask</text>
+    <g stroke="currentColor" stroke-width="1.2">
+      <rect x="40" y="60" width="110" height="80" rx="6" fill="var(--raw)" fill-opacity=".55"/>
+      <rect x="40" y="150" width="110" height="28" rx="5" fill="var(--raw)" fill-opacity=".35"/>
+      <rect x="46" y="182" width="12" height="60" fill="var(--raw)" fill-opacity=".8"/>
+      <rect x="78" y="182" width="12" height="60" fill="var(--raw)" fill-opacity=".45"/>
+      <rect x="104" y="182" width="12" height="60" fill="var(--raw)" fill-opacity=".65"/>
+      <rect x="134" y="182" width="12" height="60" fill="var(--raw)" fill-opacity=".3"/>
+    </g>
+    <text x="160" y="105" font-size="11" class="dim">靠背</text>
+    <text x="160" y="168" font-size="11" class="dim">座面</text>
+    <text x="160" y="215" font-size="11" class="dim">腿 ×4</text>
+    <text x="40" y="270" font-size="12" class="dim">每个 GT 平均被切成 <tspan class="mono" font-weight="500">2.22</tspan> 块</text>
+
+    <!-- arrow -->
+    <line x1="230" y1="150" x2="290" y2="150" stroke="currentColor" stroke-width="1.5" marker-end="url(#a1)"/>
+    <text x="260" y="140" font-size="11" text-anchor="middle" class="dim">同一批点</text>
+
+    <!-- panel 2: GT -->
+    <text x="310" y="26" font-size="13" font-weight="600">数据集标注：1 个物体</text>
+    <g stroke="currentColor" stroke-width="1.2" fill="var(--ours)" fill-opacity=".35">
+      <path d="M330 60 h110 a6 6 0 0 1 6 6 v108 a5 5 0 0 1 -5 5 h-3 v63 h-12 v-63 h-20 v63 h-12 v-63 h-14 v63 h-12 v-63 h-18 v63 h-12 v-63 h-3 a5 5 0 0 1 -5 -5 v-108 a6 6 0 0 1 6 -6 z"/>
+    </g>
+    <text x="330" y="270" font-size="12" class="dim">ESAM 的每个 mask 平均由 <tspan class="mono" font-weight="500">7.0</tspan> 个这样的组构成</text>
+
+    <!-- panel 3: ladder -->
+    <text x="560" y="26" font-size="13" font-weight="600">掩码固定、只改分组 → 平均最佳 IoU</text>
+    <g font-size="12">
+      <!-- axis: x from 560 to 920 => 0..1 -->
+      <line x1="560" y1="250" x2="920" y2="250" stroke="currentColor" stroke-opacity=".35"/>
+      <g class="dim mono" font-size="10.5">
+        <text x="560" y="266" text-anchor="middle">0</text>
+        <text x="740" y="266" text-anchor="middle">0.5</text>
+        <text x="920" y="266" text-anchor="middle">1.0</text>
+      </g>
+      <!-- bars: width = v*360 -->
+      <rect x="560" y="52"  width="191.5" height="22" rx="3" fill="var(--raw)"/>
+      <rect x="560" y="92"  width="271.4" height="22" rx="3" fill="var(--frozen)"/>
+      <rect x="560" y="132" width="276.8" height="22" rx="3" fill="var(--ours)"/>
+      <rect x="560" y="172" width="282.2" height="22" rx="3" fill="var(--ours)" fill-opacity=".55"/>
+      <text x="566" y="47">原始组（部件粒度）</text><text class="mono" x="757" y="68" font-weight="500">0.532</text>
+      <text x="566" y="87">ESAM 训练版解码器，47M 参数</text><text class="mono" x="837" y="108" font-weight="500">0.754</text>
+      <text x="566" y="127">GT 上界：只合并相邻组</text><text class="mono" x="842" y="148" font-weight="500">0.769</text>
+      <text x="566" y="167">GT 上界：任意合并</text><text class="mono" x="848" y="188" font-weight="500">0.784</text>
+      <!-- marker line at 0.769 -->
+      <line x1="836.8" y1="44" x2="836.8" y2="250" stroke="var(--ours)" stroke-width="1.2" stroke-dasharray="4 3"/>
+      <text x="842" y="238" font-size="11" fill="var(--ours)">训练版没有越过这条线</text>
+      <!-- brace annotation -->
+      <line x1="751.5" y1="226" x2="848.2" y2="226" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+      <text x="800" y="221" font-size="11" text-anchor="middle" class="dim">Granularity Gap +0.252</text>
+    </g>
+  </svg>
+  </div>
+  <figcaption><b>一句话论断。</b>把 FastSAM 的 mask 集合完全固定，只允许改变「哪些组属于同一个物体」，平均最佳 IoU 就从 0.532 升到 0.784，召回@0.5 从 0.515 升到 0.871；而一个训练了 128 个 epoch 的 47M 参数解码器只到 0.754，没有越过「只合并相邻组」的 GT 上界 0.769。误差的主导项是粒度，不是识别。</figcaption>
+  <div class="src">来源：docs/esam_granularity.zh-CN.md（4,314 个 thing GT，逐帧平均）</div>
+</figure>
+
+<!-- ============ Fig 2 ============ -->
+<figure>
+  <div class="plate"><h2>图 2 · 方法：一个零训练的粒度算子，表示单位是 query</h2><span class="badge meas">M1/M2 已实现</span><span class="badge plan">M3/M4 待做</span></div>
+  <div class="scroll">
+  <svg viewBox="0 0 1120 420" role="img" aria-label="流程：冻结 FastSAM 产生互斥分组并提升为 query；帧内粒度算子在外观几何联合图上做带稳定性判据的合并；跨帧关联用冻结特征做矩阵匹配；有界 query 记忆以实例为单位存储，与帧数无关；同一算子在粗粒度下给出房间层级">
+    <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- frozen band -->
+    <rect x="16" y="22" width="430" height="150" rx="8" fill="var(--frozen)" fill-opacity=".07" stroke="var(--frozen)" stroke-dasharray="5 4"/>
+    <text x="28" y="42" font-size="11.5" fill="var(--frozen)" font-weight="600">冻结，不训练（M1 Query Lifting）</text>
+    <!-- box: RGB-D -->
+    <rect x="30" y="60" width="90" height="90" rx="6" fill="var(--surface)" stroke="currentColor"/>
+    <text x="75" y="98" font-size="12.5" text-anchor="middle" font-weight="600">RGB-D 流</text>
+    <text x="75" y="116" font-size="11" text-anchor="middle" class="dim">posed 帧</text>
+    <line x1="120" y1="105" x2="150" y2="105" stroke="currentColor" stroke-width="1.4" marker-end="url(#a2)"/>
+    <!-- box: FastSAM -->
+    <rect x="150" y="60" width="110" height="90" rx="6" fill="var(--surface)" stroke="currentColor"/>
+    <text x="205" y="92" font-size="12.5" text-anchor="middle" font-weight="600">FastSAM-x</text>
+    <text x="205" y="110" font-size="11" text-anchor="middle" class="dim">mask + 特征图</text>
+    <text x="205" y="126" font-size="10.5" text-anchor="middle" class="dim mono">backbone s32 · proto s4</text>
+    <line x1="260" y1="105" x2="292" y2="105" stroke="currentColor" stroke-width="1.4" marker-end="url(#a2)"/>
+    <text x="276" y="96" font-size="10" text-anchor="middle" class="dim">互斥化</text>
+    <!-- box: queries -->
+    <rect x="292" y="60" width="140" height="90" rx="6" fill="var(--surface)" stroke="currentColor"/>
+    <text x="362" y="86" font-size="12.5" text-anchor="middle" font-weight="600">query q = (F<tspan font-size="9" dy="3">s</tspan><tspan dy="-3">, 几何, 支撑)</tspan></text>
+    <text x="362" y="106" font-size="11" text-anchor="middle" class="dim">每帧 ≈73 个，而非 20k 点</text>
+    <text x="362" y="124" font-size="11" text-anchor="middle" class="dim">20k 点 → KMeans 补组</text>
+    <text x="362" y="140" font-size="10.5" text-anchor="middle" class="dim">减帧均值 + L2</text>
+
+    <!-- M2 operator -->
+    <line x1="432" y1="105" x2="480" y2="105" stroke="currentColor" stroke-width="1.4" marker-end="url(#a2)"/>
+    <rect x="480" y="30" width="300" height="150" rx="8" fill="var(--ours)" fill-opacity=".08" stroke="var(--ours)"/>
+    <text x="494" y="50" font-size="11.5" fill="var(--ours)" font-weight="600">M2 帧内粒度算子</text>
+    <!-- mini graph -->
+    <g stroke="currentColor" stroke-opacity=".6">
+      <line x1="510" y1="100" x2="545" y2="80"/><line x1="545" y1="80" x2="580" y2="100"/><line x1="510" y1="100" x2="545" y2="125"/><line x1="545" y1="125" x2="580" y2="100"/><line x1="580" y1="100" x2="615" y2="90"/>
+    </g>
+    <g fill="var(--ours)"><circle cx="510" cy="100" r="6"/><circle cx="545" cy="80" r="6"/><circle cx="580" cy="100" r="6"/><circle cx="545" cy="125" r="6"/></g>
+    <circle cx="615" cy="90" r="6" fill="var(--raw)"/>
+    <text x="562" y="150" font-size="11" text-anchor="middle" class="dim">相邻组图：≈410 条边 / 帧</text>
+    <text x="562" y="166" font-size="10.5" text-anchor="middle" class="dim">14 个边标量，建图顺带得到</text>
+    <!-- merge tree -->
+    <g stroke="currentColor" stroke-width="1.2" fill="none">
+      <path d="M650 150 v-30 h40 v30 M670 120 v-25 h35 v25 M687 95 v-25 h30 v25 M702 70 v-20"/>
+      <line x1="640" y1="88" x2="760" y2="88" stroke="var(--ours)" stroke-dasharray="4 3"/>
+    </g>
+    <text x="740" y="84" font-size="10" text-anchor="end" fill="var(--ours)">稳定性判据</text>
+    <text x="705" y="166" font-size="10.5" text-anchor="middle" class="dim">合并树 · 持续区间选划分</text>
+
+    <!-- M3 -->
+    <line x1="780" y1="105" x2="825" y2="105" stroke="currentColor" stroke-width="1.4" marker-end="url(#a2)"/>
+    <text x="802" y="96" font-size="10" text-anchor="middle" class="dim">帧内实例</text>
+    <rect x="825" y="30" width="270" height="150" rx="8" fill="var(--ours)" fill-opacity=".08" stroke="var(--ours)"/>
+    <text x="839" y="50" font-size="11.5" fill="var(--ours)" font-weight="600">M3 跨帧关联（矩阵运算，无学习参数）</text>
+    <text x="960" y="80" font-size="12.5" text-anchor="middle" class="mono">S = (Z<tspan font-size="9" dy="-5">cur</tspan><tspan dy="5"> · Z</tspan><tspan font-size="9" dy="-5">next</tspan><tspan dy="5">ᵀ) ⊙ Geo</tspan></text>
+    <text x="960" y="102" font-size="11" text-anchor="middle" class="dim">外观相似度 × 几何重叠（bbox IoU）</text>
+    <text x="960" y="120" font-size="11" text-anchor="middle" class="dim">候选剪枝 → 分配，近线性</text>
+    <text x="960" y="146" font-size="10.5" text-anchor="middle" class="dim">G×G 矩阵，G≈70：无 KD-tree、无逐边循环</text>
+    <text x="960" y="164" font-size="10.5" text-anchor="middle" class="dim">分析：几何歧义 vs 外观歧义 的互补</text>
+
+    <!-- M4 memory -->
+    <line x1="960" y1="180" x2="960" y2="222" stroke="currentColor" stroke-width="1.4" marker-end="url(#a2)"/>
+    <line x1="630" y1="180" x2="630" y2="222" stroke="currentColor" stroke-width="1.4" marker-end="url(#a2)"/>
+    <rect x="480" y="222" width="615" height="120" rx="8" fill="var(--ours)" fill-opacity=".08" stroke="var(--ours)"/>
+    <text x="494" y="242" font-size="11.5" fill="var(--ours)" font-weight="600">M4 有界 query 记忆：规模 ∝ 实例数，与帧数无关</text>
+    <g font-size="11" class="mono">
+      <rect x="496" y="254" width="300" height="76" rx="4" fill="var(--surface)" stroke="currentColor" stroke-opacity=".5"/>
+      <text x="506" y="272">z        外观原型（EMA，L2）        1 KB</text>
+      <text x="506" y="290">support  体素哈希 key，上限 S=256    2 KB</text>
+      <text x="506" y="308">bbox · counters · stability          56 B</text>
+      <text x="506" y="326" class="dim">≈ 3 KB / 实例  ·  K=200 ⇒ 0.6 MB</text>
+    </g>
+    <g font-size="11.5">
+      <text x="820" y="272">生成 · 吸收 · 稀疏化</text>
+      <text x="820" y="292">回收 → 休眠池 → 外观唤醒</text>
+      <text x="820" y="312">拆分检查（支撑集双峰 + 细颈）</text>
+      <text x="820" y="332" class="dim" font-size="10.5">对应目前 22% 需拆分的 GT</text>
+    </g>
+
+    <!-- outputs -->
+    <line x1="790" y1="342" x2="790" y2="372" stroke="currentColor" stroke-width="1.4" marker-end="url(#a2)"/>
+    <rect x="560" y="372" width="200" height="36" rx="6" fill="var(--surface)" stroke="currentColor"/>
+    <text x="660" y="395" font-size="12.5" text-anchor="middle" font-weight="600">物体级实例（在线）</text>
+    <rect x="820" y="372" width="230" height="36" rx="6" fill="var(--surface)" stroke="currentColor"/>
+    <text x="935" y="395" font-size="12.5" text-anchor="middle" font-weight="600">房间 / 楼层层级（同一算子，粗粒度）</text>
+    <line x1="760" y1="390" x2="820" y2="390" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="790" y="383" font-size="10" text-anchor="middle" class="dim">换粒度</text>
+  </svg>
+  </div>
+  <figcaption><b>把表示的单位从点换成 query。</b>之后所有操作都在每帧约 73 个 query 上进行，而不是 2 万个点上：帧内对齐是 query 图上的合并，跨帧关联是 G×G 的矩阵乘，场景记忆以实例为单位存储。阈值由合并树的持续区间决定，而不是在任何训练集上调参，所以换数据集、换粒度都不需要重训。</figcaption>
+  <div class="src">M1/M2 实现与数字见 docs/merge_net.zh-CN.md；M3 照 ESAM OnlineMerge 的乘性形式，把训练量换成冻结特征</div>
+</figure>
+
+<!-- ============ Fig 3 ============ -->
+<figure>
+  <div class="plate"><h2>图 3 · 粒度是一个旋钮：同一场景、同一算子、三个尺度</h2><span class="badge plan">预期 · 协议 C 待做</span></div>
+  <div class="scroll">
+  <svg viewBox="0 0 980 330" role="img" aria-label="左：同一场景在部件、物体、房间三个粒度设置下的划分示意；右：可控性曲线，IoU 随粒度设置变化，两套不同粒度的标注各自对应曲线上一个峰值，且方法不需要被告知该粒度">
+    <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- spectrum axis -->
+    <line x1="40" y1="250" x2="440" y2="250" stroke="currentColor" stroke-width="1.4" marker-end="url(#a3)"/>
+    <text x="40" y="272" font-size="11.5" class="dim">细 ← 粒度设定 τ → 粗</text>
+    <text x="440" y="272" font-size="11.5" class="dim" text-anchor="end">零训练，只改一个标量</text>
+    <!-- part level -->
+    <g>
+      <text x="100" y="40" font-size="12.5" text-anchor="middle" font-weight="600">部件</text>
+      <g fill="var(--raw)" stroke="var(--surface)" stroke-width="1.5">
+        <circle cx="70" cy="90" r="9"/><circle cx="92" cy="78" r="9"/><circle cx="112" cy="96" r="9"/><circle cx="84" cy="112" r="9"/><circle cx="106" cy="124" r="9"/>
+        <circle cx="68" cy="150" r="9"/><circle cx="94" cy="160" r="9"/><circle cx="120" cy="150" r="9"/><circle cx="140" cy="130" r="9"/>
+        <circle cx="76" cy="196" r="9"/><circle cx="104" cy="200" r="9"/><circle cx="130" cy="190" r="9"/>
+      </g>
+      <text x="100" y="230" font-size="11" text-anchor="middle" class="dim">≈69 mask / 帧</text>
+    </g>
+    <!-- object level -->
+    <g>
+      <text x="240" y="40" font-size="12.5" text-anchor="middle" font-weight="600">物体</text>
+      <g fill="var(--ours)" stroke="var(--surface)" stroke-width="1.5">
+        <ellipse cx="230" cy="100" rx="40" ry="30"/><ellipse cx="240" cy="155" rx="44" ry="22"/><ellipse cx="236" cy="198" rx="36" ry="16"/>
+      </g>
+      <text x="240" y="230" font-size="11" text-anchor="middle" class="dim">≈9–12 mask / 帧</text>
+    </g>
+    <!-- room level -->
+    <g>
+      <text x="380" y="40" font-size="12.5" text-anchor="middle" font-weight="600">房间</text>
+      <rect x="320" y="70" width="120" height="140" rx="10" fill="var(--ours)" fill-opacity=".35" stroke="var(--ours)"/>
+      <text x="380" y="230" font-size="11" text-anchor="middle" class="dim">层级输出</text>
+    </g>
+
+    <!-- controllability curve -->
+    <text x="520" y="40" font-size="12.5" font-weight="600">可控性曲线（预期）</text>
+    <g class="dim" font-size="11">
+      <line x1="540" y1="250" x2="940" y2="250" stroke="currentColor" stroke-opacity=".4"/>
+      <line x1="540" y1="250" x2="540" y2="70" stroke="currentColor" stroke-opacity=".4"/>
+      <text x="530" y="74" text-anchor="end" class="mono" font-size="10.5">IoU</text>
+      <text x="740" y="272" text-anchor="middle">粒度设定 τ（细 → 粗）</text>
+    </g>
+    <path d="M550 236 C 600 225, 640 140, 690 120 C 720 108, 745 125, 770 150 C 800 180, 820 112, 850 98 C 880 84, 910 120, 935 190" fill="none" stroke="var(--ours)" stroke-width="2"/>
+    <!-- GT markers -->
+    <line x1="690" y1="250" x2="690" y2="110" stroke="var(--raw)" stroke-dasharray="4 3"/>
+    <text x="690" y="100" font-size="11" text-anchor="middle" fill="var(--raw)">Fine-50 标注粒度</text>
+    <line x1="850" y1="250" x2="850" y2="88" stroke="var(--frozen)" stroke-dasharray="4 3"/>
+    <text x="850" y="78" font-size="11" text-anchor="middle" fill="var(--frozen)">ScanNet 物体粒度</text>
+    <circle cx="690" cy="120" r="5" fill="var(--ours)" stroke="var(--surface)" stroke-width="1.5"/>
+    <circle cx="850" cy="98" r="5" fill="var(--ours)" stroke="var(--surface)" stroke-width="1.5"/>
+    <text x="740" y="300" font-size="11" text-anchor="middle" class="dim">检验：峰值是否落在各自的标注粒度上，而方法没有被告知该粒度</text>
+  </svg>
+  </div>
+  <figcaption><b>同一批 ScanNet 场景在本机有两套不同粒度的标注</b>（ScanNet 物体级，以及 SAMPro3D 的 ScanNet200-Fine50）。一个真正做「对齐」的算子应当在两套标注上各自出现峰值，且峰值位置不需要被告知。这张图是协议 C 的目标形态，曲线为示意。</figcaption>
+  <div class="src">数据：class_agnostic_3d_eval/{scannet_v2_val_minimal, sampro3d_scannet200_fine50}</div>
+</figure>
+
+<!-- ============ Fig 4 ============ -->
+<figure>
+  <div class="plate"><h2>图 4 · 为什么能 Scale Up：记忆与帧数无关</h2><span class="badge plan">左：解析计算</span><span class="badge meas">右：已测</span></div>
+  <div class="grid2">
+  <div class="scroll">
+  <svg viewBox="0 0 480 300" role="img" aria-label="场景记忆占用随帧数的变化：ESAM 式稠密 mask 存储随帧数线性增长，1000 帧时约 3.7 GiB；本文 query 记忆保持约 0.6 MB 不变">
+    <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- axes: x 60..440 => T 0..1000 ; y log10(MB) -1..4 => 250..50 (40px per decade) -->
+    <g class="dim" font-size="10.5">
+      <line x1="60" y1="250" x2="440" y2="250" stroke="currentColor" stroke-opacity=".4"/>
+      <line x1="60" y1="250" x2="60" y2="50" stroke="currentColor" stroke-opacity=".4"/>
+      <g class="mono">
+        <text x="52" y="254" text-anchor="end">0.1 MB</text>
+        <text x="52" y="214" text-anchor="end">1 MB</text>
+        <text x="52" y="174" text-anchor="end">10 MB</text>
+        <text x="52" y="134" text-anchor="end">100 MB</text>
+        <text x="52" y="94" text-anchor="end">1 GB</text>
+        <text x="52" y="54" text-anchor="end">10 GB</text>
+        <text x="60" y="268" text-anchor="middle">0</text>
+        <text x="250" y="268" text-anchor="middle">500</text>
+        <text x="440" y="268" text-anchor="middle">1000 帧</text>
+      </g>
+      <g stroke="currentColor" stroke-opacity=".12"><line x1="60" y1="210" x2="440" y2="210"/><line x1="60" y1="170" x2="440" y2="170"/><line x1="60" y1="130" x2="440" y2="130"/><line x1="60" y1="90" x2="440" y2="90"/></g>
+    </g>
+    <!-- ESAM dense: bytes = 4 MB * T  => log10(MB)=log10(4T): T=1:0.6→y=186 ; T=10:1.6→146; T=100:2.6→106; T=1000:3.6→66 ; x = 60+0.38*T -->
+    <path d="M60.4 186 L63.8 146 L98 106 L440 66" fill="none" stroke="var(--frozen)" stroke-width="2"/>
+    <circle cx="440" cy="66" r="4" fill="var(--frozen)"/>
+    <text x="300" y="86" font-size="11" fill="var(--frozen)">ESAM 式 (K, T·N) bool，K=200</text>
+    <text x="434" y="60" font-size="10.5" text-anchor="end" class="mono">3.7 GiB</text>
+    <!-- ours flat 0.6 MB => log10=-0.22 => y=250-(-0.22+1)*40=218.8 -->
+    <line x1="60" y1="219" x2="440" y2="219" stroke="var(--ours)" stroke-width="2"/>
+    <circle cx="440" cy="219" r="4" fill="var(--ours)"/>
+    <text x="300" y="236" font-size="11" fill="var(--ours)">本文 query 记忆，K=200 实例</text>
+    <text x="434" y="213" font-size="10.5" text-anchor="end" class="mono">0.6 MB</text>
+    <text x="250" y="292" font-size="10.5" text-anchor="middle" class="dim">N=20,000 点/帧；本文每实例 ≈3 KB，有硬上界</text>
+  </svg>
+  </div>
+  <div class="scroll">
+  <svg viewBox="0 0 480 300" role="img" aria-label="每帧延迟分解：传统 CPU 路径 364.9 毫秒，全 GPU 矩阵路径 193.6 毫秒；FastSAM 与提升占大头，建图其次，模型与聚类极小">
+    <text x="20" y="28" font-size="12.5" font-weight="600">每帧延迟（ms，RTX 5090）</text>
+    <!-- scale: 1 ms = 1.05 px, origin x=120 -->
+    <g font-size="11">
+      <text x="110" y="78" text-anchor="end">传统 CPU 路径</text>
+      <!-- 1 ms = 0.78 px, origin x=120; segments: FastSAM+提升 / 建图+标签 / 模型+聚类, 2px gaps -->
+      <rect x="120"   y="62" width="209.5" height="22" rx="2" fill="var(--frozen)" fill-opacity=".85"/>
+      <rect x="331.5" y="62" width="69.6"  height="22" rx="2" fill="var(--frozen)" fill-opacity=".5"/>
+      <rect x="403.1" y="62" width="5.6"   height="22" rx="2" fill="var(--frozen)" fill-opacity=".3"/>
+      <text class="mono" x="414" y="78" font-weight="500">364.9</text>
+      <text x="110" y="128" text-anchor="end">全 GPU 矩阵路径</text>
+      <rect x="120"   y="112" width="97.3" height="22" rx="2" fill="var(--ours)" fill-opacity=".85"/>
+      <rect x="219.3" y="112" width="48.3" height="22" rx="2" fill="var(--ours)" fill-opacity=".5"/>
+      <rect x="269.6" y="112" width="5.3"  height="22" rx="2" fill="var(--ours)" fill-opacity=".3"/>
+      <text class="mono" x="281" y="128" font-weight="500">193.6</text>
+      <g font-size="10.5" class="dim">
+        <rect x="120" y="148" width="10" height="10" rx="2" fill="currentColor" fill-opacity=".85"/><text x="134" y="157">FastSAM + 提升</text>
+        <rect x="230" y="148" width="10" height="10" rx="2" fill="currentColor" fill-opacity=".5"/><text x="244" y="157">建图 + 标签</text>
+        <rect x="320" y="148" width="10" height="10" rx="2" fill="currentColor" fill-opacity=".3"/><text x="334" y="157">模型 + 聚类</text>
+      </g>
+    </g>
+    <!-- breakdown table as text -->
+    <g font-size="11" class="mono">
+      <text x="20" y="178" class="dim">阶段            CPU 路径   GPU 路径</text>
+      <text x="20" y="198">FastSAM + 提升    268.6      124.8</text>
+      <text x="20" y="216">建图 + 标签        89.2       61.9</text>
+      <text x="20" y="234">模型前向            2.4        2.2</text>
+      <text x="20" y="252">聚类                4.7        4.6</text>
+      <text x="20" y="280" class="dim">ESAM-E 本机原生 warm loop：154 ms/帧（6.48 FPS）</text>
+    </g>
+  </svg>
+  </div>
+  </div>
+  <figcaption><b>两个数量级以上的差距，而且有硬上界。</b>ESAM 用稠密的 (K, T·N) 布尔张量存历史 mask，随帧数线性增长；本文以实例为单位存一个外观原型、一个有上限的体素支撑集和几个计数器，记忆大小只随实例数变化。右图是目前的端到端延迟：把建图、特征采样与补组全部换成 GPU 矩阵运算后从 364.9 降到 193.6 ms，M3/M4 完成后目标是 100 ms 以内。</figcaption>
+  <div class="src">内存：解析计算（K=200, N=20k）；延迟：TrainingFreeSAM3D 会话实测，ESAM-E 数字来自 ESAM/local/fps_native_warm.json</div>
+</figure>
+
+<!-- ============ Fig 5 ============ -->
+<figure>
+  <div class="plate"><h2>图 5 · 剩下的误差长什么样</h2><span class="badge meas">已测</span></div>
+  <div class="grid2">
+  <div class="scroll">
+  <svg viewBox="0 0 480 240" role="img" aria-label="1388 个 thing GT 的三段分解：50% 单组已达标，29% 被切碎且可由合并修复，22% 落在不纯组需要拆分或漏检">
+    <text x="20" y="28" font-size="12.5" font-weight="600">1,388 个 thing GT：合并能修什么</text>
+    <!-- stacked bar: total width 440 at x=20, y=50 -->
+    <rect x="20" y="50" width="220" height="26" fill="var(--frozen)" fill-opacity=".35"/>
+    <rect x="242" y="50" width="127.6" height="26" fill="var(--ours)"/>
+    <rect x="371.6" y="50" width="88.4" height="26" fill="var(--bad)" fill-opacity=".75"/>
+    <g font-size="11">
+      <text x="20" y="96">单组已 ≥0.5 IoU · 50%</text>
+      <text x="20" y="112" class="dim mono" font-size="10.5">0.724 → oracle 0.825，本文 0.715</text>
+      <text x="20" y="140" fill="var(--ours)" font-weight="600">被切碎、纯组可合并 · 29%</text>
+      <text x="20" y="156" class="dim mono" font-size="10.5">0.340 → oracle 0.823，本文 0.611（拿到 56% 的 oracle 收益）</text>
+      <text x="20" y="184" fill="var(--bad)" font-weight="600">落在不纯组：需拆分 / 漏检 · 22%</text>
+      <text x="20" y="200" class="dim mono" font-size="10.5">0.301 → oracle 0.323：合并无能为力，明确写成 limitation</text>
+    </g>
+  </svg>
+  </div>
+  <div class="scroll">
+  <svg viewBox="0 0 480 240" role="img" aria-label="172 个被过度合并的案例按原因分：114 个是不同类别的相邻物体，31 个同类别，27 个并入墙或地面">
+    <text x="20" y="28" font-size="12.5" font-weight="600">172 个过度合并案例的成因</text>
+    <!-- bars: 1 count = 2.6 px -->
+    <g font-size="11.5">
+      <text x="150" y="72" text-anchor="end">不同类别的相邻物体</text>
+      <rect x="160" y="58" width="296" height="20" rx="3" fill="var(--bad)" fill-opacity=".75"/>
+      <text class="mono" x="166" y="73" fill="#fff" font-weight="500">114</text>
+      <text x="150" y="112" text-anchor="end">同类别相邻</text>
+      <rect x="160" y="98" width="80.6" height="20" rx="3" fill="var(--bad)" fill-opacity=".45"/>
+      <text class="mono" x="248" y="113">31</text>
+      <text x="150" y="152" text-anchor="end">并入墙 / 地面</text>
+      <rect x="160" y="138" width="70.2" height="20" rx="3" fill="var(--bad)" fill-opacity=".3"/>
+      <text class="mono" x="238" y="153">27</text>
+    </g>
+    <text x="20" y="200" font-size="11" class="dim">例：背包放在脚凳上、钟挂在墙上。</text>
+    <text x="20" y="218" font-size="11" class="dim">这是语义问题 → 节点需要外观特征，也是 M3 缺分类头的直接代价。</text>
+  </svg>
+  </div>
+  </div>
+  <figcaption><b>失败是可分类的。</b>合并路线能修的是中间那 29%，我们拿到了其中 56% 的上界收益；左侧 50% 不该动的实例里有 15% 被过度合并，三分之二是不同类别叠放在一起的物体，这正是外观特征而非几何能解决的部分；右侧 22% 需要逐点拆分，超出「只合并」的范畴，在论文里作为明确的边界。</figcaption>
+  <div class="src">来源：docs/merge_net.zh-CN.md §4、§8</div>
+</figure>
+
+</div>
