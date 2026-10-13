@@ -56,14 +56,16 @@ def mesh_gtset(mesh_gt, mesh_sem, stuff, min_gt_points=100):
     return GTSet.from_labels(mesh_gt, keep) if keep else None
 
 
-def scene_metrics(masks, scores, gts, min_points=100):
+def scene_metrics(masks, scores, gts, min_points=100, device='cpu'):
     keep = masks.sum(1) >= min_points
     masks, scores = masks[keep], scores[keep]
     if len(masks) == 0:
         return dict(ap50=0.0, ap25=0.0, iou=0.0, r50=0.0, masks=0)
-    cov = coverage_stats(masks, gts)
-    return dict(ap50=class_agnostic_ap(masks, scores, gts, .5), ap25=class_agnostic_ap(masks, scores, gts, .25),
-                iou=cov['mean_best_iou'], r50=cov['recall@0.5'], frags=float(fragments_per_gt(masks, gts).mean()),
+    cov = coverage_stats(masks, gts, device=device)
+    return dict(ap50=class_agnostic_ap(masks, scores, gts, .5, device=device),
+                ap25=class_agnostic_ap(masks, scores, gts, .25, device=device),
+                iou=cov['mean_best_iou'], r50=cov['recall@0.5'],
+                frags=float(fragments_per_gt(masks, gts, device=device).mean()),
                 masks=int(len(masks)))
 
 

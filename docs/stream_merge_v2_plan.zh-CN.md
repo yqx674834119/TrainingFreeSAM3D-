@@ -172,6 +172,50 @@
 
 ---
 
+## 3c. 第 0c 阶段：真实管线（不用 GT）+ 0b 的免费收尾（不训练，已完成）
+
+背景：0b 的 0.721 建立在 GT oracle 合并之上——oracle 把"混了两个物体的碎片"判成孤立的单帧物体，
+"丢掉只出现一帧的物体"于是干净地把它们删掉。真实合并可能把混合碎片粘进真物体，0.721 未必成立。
+本阶段把 0b 的免费收尾搬到不用 GT 的真实管线上，量真实 AP50。
+
+内容：
+1. P1 = 现有默认管线（QueryMemory + 投影头 + MaskScorer + 逐帧提案），按 `docs/streaming.zh-CN.md` §3 跑。
+2. P2 = WindowMemory(window=1)，输入只读 `work_dirs/merge_cache/val`。新打分函数
+   `freesam3d/streaming/window_scores.py`：帧内碎片之间用现有 GroupMergeNet；其余边用
+   P2a = max(两向包含度)、P2b = max(两向包含度) × clamp(feat_cos,0,1)，直接取 pair_features 的列。
+   **不用投影头**：merge_cache 的特征已做过帧内去均值，与投影头的训练分布不符。
+3. 阈值取 GroupMergeNet checkpoint 标定的 0.65，另跑固定 0.5 作对照；**不在验证集上调**。
+4. 后处理复用 `postprocess.py`，阈值同 0b：排序 {conf,size,nobs} × 清理 {none, nms, nms+丢单帧}，
+   不做 top-K 截断；每组另加"S_oracle 排序 + nms"上限行。段平滑为主、未平滑附表。
+5. 代码：`freesam3d/streaming/window_scores.py`、`freesam3d/streaming/fragment_fate.py`、
+   `postprocess.overmerge_flags()`、入口 `tools/window_real_eval.py`（cache/eval 分阶段），
+   结果在 `work_dirs/stream_v2/phase0c/`；测试 `tests/test_window_scores.py`、`tests/test_iou_torch.py`。
+   评测用的 IoU 原语加了可选 `device`（CUDA 路径与 numpy 参考逐位对照），默认行为不变。
+
+结果（16 场景，段平滑后）：
+- **P1 复现 0.365**（与文档一致）；免费收尾后 0.369，
+  mask 35.7 → 33.8，几乎零收益。
+- **P2 四个变体最好 0.239 / 0.164 / 0.202 /
+  0.172**（p2a_calib / p2b_calib / p2a_0.5 / p2b_0.5），全部低于 P1 的
+  0.369，也低于 ESAM 0.589。
+- 合并不完美的代价：同排序清理下 0b oracle 0.411 对 P2 真实
+  0.084–0.137；
+  完美排序下 P2 上限 0.610 对 0b oracle
+  0.877 → **合并本身 −0.27**。
+  主因是**漏粘**（dup_rate 0.13–0.46、frags/GT 1.1–3.6、overmerge ≤0.061）。
+- **「丢单帧」失效**：p2b_calib 0.164 → 0.068、
+  p2b_0.5 0.172 → 0.110、P1 基本不变。
+  真实欠合并下几乎每个物体 n_obs == 1，删掉的是真物体。
+- 混合碎片去向：阈值过严时 88.2% 原地成为孤立单帧物体；阈值可用时 56.6% 被干净粘入本属物体。
+- 计时：P2 记忆 64.6–76.1 ms/帧（P1 的 QueryMemory.update 7.3 ms/帧）。
+- **对 0b 结论的修正**：F0b.4「差距主要在排序」只在 oracle 合并下成立；真实管线上**先学合并**，
+  且阈值要在几何包含度尺度上重标——checkpoint 的 0.65 与包含度不可比，`average_linkage` 的簇间均值
+  会把正确证据被帧内错误稀释。
+
+【停】等用户确认后进入第 1 阶段。
+
+---
+
 ## 4. 第 1 阶段：训练数据与探针
 
 ### 4.1 连续帧缓存

@@ -36,19 +36,38 @@ def groups_to_masks(group_ids):
     return group_ids[None, :] == ids[:, None], ids
 
 
-def iou_matrix(pred, gts: GTSet):
-    """(P, K) IoU, counting only labeled points."""
+def _labeled_terms(pred, gts: GTSet, device='cpu'):
+    """``pred`` (P, N) Boolean x ``gts`` -> (inter (P, K) float32, |pred & labeled| (P,) int).
+
+    One float32 matmul. On CUDA the AND, the matmul and the reduction all run on the GPU and
+    only the (P, K) / (P,) results come back: with P up to ~1500 masks over ~211k mesh vertices
+    the numpy path costs minutes per scene. Numerically identical to the numpy reference
+    (asserted in tests/test_iou_torch.py).
+    """
+    if not (isinstance(device, str) and device == 'cpu'):   # torch.device('cpu') -> torch path
+        import torch
+        t_pred = torch.from_numpy(np.ascontiguousarray(pred)).to(device)
+        t_lab = torch.from_numpy(np.ascontiguousarray(gts.labeled)).to(device)
+        t_oh = torch.from_numpy(np.ascontiguousarray(gts.onehot)).to(device).to(torch.float32)
+        p = t_pred & t_lab
+        pf = p.to(torch.float32)
+        return (pf @ t_oh).to('cpu').numpy(), p.sum(1).to('cpu').numpy()
     p = pred & gts.labeled[None, :]
-    inter = p.astype(np.float32) @ gts.onehot.astype(np.float32)
-    union = p.sum(1, keepdims=True) + gts.sizes[None, :] - inter
+    return p.astype(np.float32) @ gts.onehot.astype(np.float32), p.sum(1)
+
+
+def iou_matrix(pred, gts: GTSet, device='cpu'):
+    """(P, K) IoU, counting only labeled points."""
+    inter, size_p = _labeled_terms(pred, gts, device)
+    union = size_p[:, None] + gts.sizes[None, :] - inter
     return inter / np.maximum(union, 1)
 
 
-def coverage_stats(pred, gts: GTSet, thresholds=(0.25, 0.5)):
+def coverage_stats(pred, gts: GTSet, thresholds=(0.25, 0.5), device='cpu'):
     """Best IoU per GT, recall@t (GT matched by any mask) and precision@t."""
     if len(gts.ids) == 0:
         return {}
-    iou = iou_matrix(pred, gts) if len(pred) else np.zeros((0, len(gts.ids)))
+    iou = iou_matrix(pred, gts, device) if len(pred) else np.zeros((0, len(gts.ids)))
     best_gt = iou.max(0) if len(pred) else np.zeros(len(gts.ids))
     out = dict(best_iou=best_gt, mean_best_iou=float(best_gt.mean()), num_pred=int(len(pred)))
     # precision: among predictions that touch labeled points
@@ -60,7 +79,7 @@ def coverage_stats(pred, gts: GTSet, thresholds=(0.25, 0.5)):
     return out
 
 
-def fragments_per_gt(pred, gts: GTSet, purity=0.8, min_abs=50, min_frac=0.05):
+def fragments_per_gt(pred, gts: GTSet, purity=0.8, min_abs=50, min_frac=0.05, device='cpu'):
     """Number of predicted masks that are a *fragment* of each GT instance.
 
     A mask counts for GT k if its labeled points are >= ``purity`` inside k
@@ -68,14 +87,13 @@ def fragments_per_gt(pred, gts: GTSet, purity=0.8, min_abs=50, min_frac=0.05):
     """
     if len(pred) == 0:
         return np.zeros(len(gts.ids), int)
-    p = pred & gts.labeled[None, :]
-    inter = p.astype(np.float32) @ gts.onehot.astype(np.float32)          # (P, K)
-    pur = inter / np.maximum(p.sum(1, keepdims=True), 1)
+    inter, size_p = _labeled_terms(pred, gts, device)                      # (P, K)
+    pur = inter / np.maximum(size_p[:, None], 1)
     need = np.maximum(min_abs, min_frac * gts.sizes)[None, :]
     return ((pur >= purity) & (inter >= need)).sum(0)
 
 
-def class_agnostic_ap(pred, scores, gts: GTSet, threshold):
+def class_agnostic_ap(pred, scores, gts: GTSet, threshold, device='cpu'):
     """ScanNet-style AP at one IoU threshold: greedy matching by score, each GT once.
 
     Precision is made monotone (envelope) and integrated over recall.
@@ -85,7 +103,7 @@ def class_agnostic_ap(pred, scores, gts: GTSet, threshold):
         return float('nan')
     if len(pred) == 0:
         return 0.0
-    iou = iou_matrix(pred, gts)
+    iou = iou_matrix(pred, gts, device)
     order = np.argsort(-np.asarray(scores), kind='stable')
     matched = np.zeros(k, bool)
     tp = np.zeros(len(order))
@@ -169,7 +187,7 @@ def oracle_merge_adjacent(group_ids, gt, xyz, purity=0.8, eps=0.05, min_labeled=
     return out
 
 
-def association_stats(masks, gts: GTSet, thr=0.25):
+def association_stats(masks, gts: GTSet, thr=0.25, device='cpu'):
     """Duplicate / over-merge diagnostics for one scene's prediction set.
 
     * ``dup_rate``: fraction of GT instances covered (IoU >= ``thr``) by at least two
@@ -184,11 +202,10 @@ def association_stats(masks, gts: GTSet, thr=0.25):
         return dict(dup_rate=float('nan'), overmerge_rate=float('nan'), frags_per_gt=float('nan'))
     if len(masks) == 0:
         return dict(dup_rate=0.0, overmerge_rate=float('nan'), frags_per_gt=0.0)
-    p = masks & gts.labeled[None, :]
-    inter = p.astype(np.float32) @ gts.onehot.astype(np.float32)
-    iou = inter / np.maximum(p.sum(1, keepdims=True) + gts.sizes[None, :] - inter, 1)
+    inter, size_p = _labeled_terms(masks, gts, device)
+    iou = inter / np.maximum(size_p[:, None] + gts.sizes[None, :] - inter, 1)
     dup = (iou >= thr).sum(0) >= 2
     contain = inter / np.maximum(gts.sizes[None, :], 1)
     over = (contain >= 0.5).sum(1) >= 2
     return dict(dup_rate=float(dup.mean()), overmerge_rate=float(over.mean()),
-                frags_per_gt=float(fragments_per_gt(masks, gts).mean()))
+                frags_per_gt=float(fragments_per_gt(masks, gts, device=device).mean()))

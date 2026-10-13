@@ -9,23 +9,41 @@ import numpy as np
 from ..evaluation.instance import iou_matrix
 
 
-def iou_pair_matrix(masks):
-    """(K,K) IoU between the masks themselves (one float32 matmul; bool input)."""
-    m = np.asarray(masks, np.float32)
+def iou_pair_matrix(masks, device='cpu'):
+    """(K,K) IoU between the masks themselves (one float32 matmul; bool input).
+
+    ``device`` != 'cpu' runs it on the GPU. The K~1500-mask scenes stage 0c produces make this
+    ~4.8e11 flops per call (~39 s over 4 numpy threads, tens of ms on a 5090).
+    """
+    m = np.asarray(masks)
+    if len(m) == 0:
+        return np.zeros((0, 0), np.float32)
+    if not (isinstance(device, str) and device == 'cpu'):    # torch.device('cpu') -> torch path
+        import torch
+        t = torch.from_numpy(np.ascontiguousarray(m)).to(device).to(torch.float32)
+        inter = t @ t.t()
+        n = t.sum(1)
+        iou = inter / torch.clamp(n[:, None] + n[None, :] - inter, min=1)
+        return iou.to('cpu').numpy().astype(np.float32)
+    m = m.astype(np.float32)
     inter = m @ m.T
     n = m.sum(1)
     union = n[:, None] + n[None, :] - inter
     return (inter / np.maximum(union, 1)).astype(np.float32)
 
 
-def greedy_nms(masks, scores, iou_thr=0.5):
+def greedy_nms(masks, scores, iou_thr=0.5, iou=None, device='cpu'):
     """Scene-level NMS: walk masks in score order, drop any whose IoU with a kept mask exceeds
-    ``iou_thr``. Returns the kept indices in score order."""
+    ``iou_thr``. Returns the kept indices in score order.
+
+    Pass ``iou`` (a (K,K) matrix from :func:`iou_pair_matrix`) to reuse one matrix across several
+    score/cleaning combinations instead of recomputing it for each.
+    """
     masks = np.asarray(masks)
     scores = np.asarray(scores, np.float32)
     if len(masks) == 0:
         return np.zeros(0, np.int64)
-    iou = iou_pair_matrix(masks)
+    iou = iou_pair_matrix(masks, device) if iou is None else iou
     order = np.argsort(-scores, kind='stable')
     suppressed = np.zeros(len(masks), bool)
     keep = []
@@ -37,11 +55,11 @@ def greedy_nms(masks, scores, iou_thr=0.5):
     return np.asarray(keep, np.int64)
 
 
-def best_iou(masks, gts):
+def best_iou(masks, gts, device='cpu'):
     """(K,) best IoU of each mask against the GT instances (oracle ranking only; GT used)."""
     if len(masks) == 0 or len(gts.ids) == 0:
         return np.zeros(len(masks), np.float32)
-    return iou_matrix(np.asarray(masks), gts).max(1).astype(np.float32)
+    return iou_matrix(np.asarray(masks), gts, device).max(1).astype(np.float32)
 
 
 def rank_scores(mode, masks=None, conf=None, n_obs=None, iou_gt=None):
@@ -105,3 +123,17 @@ def classify_masks(masks, scores, gts, iou_thr=0.5, part_lo=0.25):
         elif row.max() >= part_lo:
             out[i] = 2
     return out
+
+
+def overmerge_flags(masks, gts, thr=0.5):
+    """(K,) bool: the mask covers >= ``thr`` of two or more GT instances ("two objects glued into one").
+
+    The per-mask counterpart of ``evaluation.instance.association_stats``'s ``overmerge_rate``;
+    uses GT, so it is a diagnostic only (stage 0c reports it, no combination filters on it).
+    """
+    masks = np.asarray(masks)
+    if len(masks) == 0 or len(gts.ids) == 0:
+        return np.zeros(len(masks), bool)
+    p = masks & gts.labeled[None, :]
+    inter = p.astype(np.float32) @ gts.onehot.astype(np.float32)
+    return ((inter / np.maximum(gts.sizes[None, :], 1)) >= thr).sum(1) >= 2
