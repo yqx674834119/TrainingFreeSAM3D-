@@ -64,6 +64,8 @@ def _contact_pairs(xyz, groups, eps, voxel):
     ga, gb = groups[pa], groups[pb]
     keep = ga != gb
     pa, pb, ga, gb = pa[keep], pb[keep], ga[keep], gb[keep]
+    if len(ga) == 0:      # every near pair was inside one group -> no contact edges
+        return np.empty((0, 2), np.int64), np.empty(0, np.int64), np.empty(0, np.int64), np.zeros(1, np.int64)
     swap = ga > gb
     pa, pb = np.where(swap, pb, pa), np.where(swap, pa, pb)
     ga, gb = np.minimum(ga, gb), np.maximum(ga, gb)

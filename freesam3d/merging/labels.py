@@ -68,3 +68,17 @@ def objectness_labels(major, purity_of, labeled_frac, sem_major, stuff, purity=0
     y = is_thing.astype(np.float32)
     valid = labeled & (is_thing | is_stuff)
     return y, valid
+
+
+def group_gt_votes(groups, gt, num_groups):
+    """Sparse per-group GT votes: (node, gt_id, count) over the labeled points of each group.
+
+    Used by the window memory (oracle / training mode) where a node's GT votes are an
+    additive statistic accumulated over the fragments that were glued into it.
+    """
+    lab = gt > 0
+    pairs = np.stack([groups[lab], gt[lab]], 1)
+    if len(pairs) == 0:
+        return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64)
+    uniq, counts = np.unique(pairs, axis=0, return_counts=True)
+    return uniq[:, 0].astype(np.int64), uniq[:, 1].astype(np.int64), counts.astype(np.int64)

@@ -167,3 +167,28 @@ def oracle_merge_adjacent(group_ids, gt, xyz, purity=0.8, eps=0.05, min_labeled=
     for g in tgt_of:
         out[group_ids == g] = base + comp[index[g]]
     return out
+
+
+def association_stats(masks, gts: GTSet, thr=0.25):
+    """Duplicate / over-merge diagnostics for one scene's prediction set.
+
+    * ``dup_rate``: fraction of GT instances covered (IoU >= ``thr``) by at least two
+      predictions — "the same object opened several pages".
+    * ``overmerge_rate``: fraction of predictions that cover >= 50% of at least two GT
+      instances — "two objects glued into one page".
+    * ``frags_per_gt``: mean number of fragment-like predictions per GT (same definition
+      as ``fragments_per_gt``).
+    """
+    n_gt = len(gts.ids)
+    if n_gt == 0:
+        return dict(dup_rate=float('nan'), overmerge_rate=float('nan'), frags_per_gt=float('nan'))
+    if len(masks) == 0:
+        return dict(dup_rate=0.0, overmerge_rate=float('nan'), frags_per_gt=0.0)
+    p = masks & gts.labeled[None, :]
+    inter = p.astype(np.float32) @ gts.onehot.astype(np.float32)
+    iou = inter / np.maximum(p.sum(1, keepdims=True) + gts.sizes[None, :] - inter, 1)
+    dup = (iou >= thr).sum(0) >= 2
+    contain = inter / np.maximum(gts.sizes[None, :], 1)
+    over = (contain >= 0.5).sum(1) >= 2
+    return dict(dup_rate=float(dup.mean()), overmerge_rate=float(over.mean()),
+                frags_per_gt=float(fragments_per_gt(masks, gts).mean()))

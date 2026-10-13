@@ -83,3 +83,18 @@ streaming:
   top_k: 20
   projection: work_dirs/stream/projection/proj/model.pt   # 跨帧特征投影头（640→512→128，InfoNCE，对标 ESAM MergeHead）
   segment_smooth: true      # 评估时按 ESAM 做 mesh-segment 平滑（ESAM 导出的 scene_masks 也是平滑后的）
+
+# 跨帧合并 v2（docs/stream_merge_v2.zh-CN.md + 执行计划 stream_merge_v2_plan.zh-CN.md）：
+# 窗口记忆 + 统一 MergeNet。帧内和跨帧是同一个任务；第一帧 = 现在的 MergeNet，之后每帧把
+# 历史物体和本帧碎片一起重新粘。最近 window 帧（含本帧）可改，更早的定稿。
+stream_v2:
+  window: 5                # 可改窗口帧数（含本帧）；1 = 过去帧立即定稿（不改历史）
+  past_unit: block         # block = 过去帧同物体的碎片合成一块；fragment = 逐碎片（消融）
+  voxel: 0.05              # 体素（米），与 QueryMemory 相同
+  touch_dilation: 1        # 节点间"接触"判定：膨胀格数
+  threshold: 0.5           # 平均连接聚类的边阈值
+  linkage: average_sparse  # 只用有边的簇对（堆 + 邻接表），语义与 average 相同
+  admit_min_points: 100    # 全是本帧碎片的一组：总点数低于此不开新物体（ESAM npoint_thr）
+  object_merge: true       # 允许两个定稿物体在同一组里合并（历史纠错）
+  purity: 0.8              # 第 0 阶段 oracle 打分：两端纯度 >= 此值且多数 GT 相同才粘
+  out_root: work_dirs/stream_v2

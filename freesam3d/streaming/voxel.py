@@ -103,3 +103,27 @@ def dilate_sets(owner, vox, radius=1):
     v = (vox[:, None] + shift[None]).reshape(-1)
     pairs = torch.unique(torch.stack([o, v], 1), dim=0)
     return pairs[:, 0], pairs[:, 1]
+
+
+def render_voxel_table(record_voxel, record_owner, num_owners, target_voxel):
+    """(K, V) bool: target voxel j belongs to owner k iff (k, voxel_j) is a record.
+
+    Pure lookup via searchsorted ranges (a voxel may be owned by several owners).
+    ``record_voxel`` must be sorted ascending; ``record_owner`` is aligned with it.
+    Shared by ``QueryMemory.render`` and ``WindowMemory.render``.
+    """
+    out = torch.zeros((num_owners, len(target_voxel)), dtype=torch.bool, device=target_voxel.device)
+    if num_owners == 0 or len(record_voxel) == 0 or len(target_voxel) == 0:
+        return out
+    lo = torch.searchsorted(record_voxel, target_voxel, right=False)
+    hi = torch.searchsorted(record_voxel, target_voxel, right=True)
+    has = hi > lo
+    if not bool(has.any()):
+        return out
+    # expand ranges (a voxel may be owned by several owners)
+    idx_pt = torch.repeat_interleave(torch.nonzero(has).squeeze(1), (hi - lo)[has])
+    starts, lens = lo[has], (hi - lo)[has]
+    offs = torch.arange(int(lens.sum()), device=target_voxel.device) - torch.repeat_interleave(torch.cumsum(lens, 0) - lens, lens)
+    rec = torch.repeat_interleave(starts, lens) + offs
+    out[record_owner[rec], idx_pt] = True
+    return out

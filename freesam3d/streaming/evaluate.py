@@ -5,10 +5,13 @@ vertices, class-agnostic AP against the mesh instance GT (thing instances >= min
 vertices), plus the per-frame-stacking lower bound (ESAM's ``ins_cat``) and, where available,
 ESAM's own exported ``scene_masks`` on the same vertices.
 """
+import os
+
 import numpy as np
 import torch
 
-from ..evaluation.instance import GTSet, class_agnostic_ap, coverage_stats, fragments_per_gt
+from ..evaluation.instance import (GTSet, class_agnostic_ap, coverage_stats, fragments_per_gt,
+                                    groups_to_masks, oracle_merge_adjacent)
 from .memory import FrameInput
 
 
@@ -81,3 +84,57 @@ def stack_frames_baseline(frames, mesh_xyz, voxel, top_k_total=200):
         keep = np.argsort(-scores)[:top_k_total]
         masks, scores = masks[keep], scores[keep]
     return masks, scores
+
+
+def frames_from_merge_cache(files, gt='3d'):
+    """merge_cache npz files -> FragmentFrames sorted by (scene, frame id).
+
+    Rebuilds exactly what the cache stores for a frame: the 20k points, the compact
+    fragment ids, the cached intra-frame graph, and the FastSAM confidence per fragment
+    (0 for the KMeans fill groups, which have no proposal mask).
+    """
+    from ..merging import cache as merge_cache
+    from .window_memory import FragmentFrame
+
+    def key(path):
+        scene, fid = os.path.basename(path)[:-4].rsplit('_', 1)
+        return scene, int(fid)
+
+    out = []
+    for path in sorted(files, key=key):
+        d = merge_cache.load(path)
+        scene, fid = key(path)
+        groups = np.asarray(d['groups'], np.int64)
+        num_groups = int(len(d['sizes']))
+        conf = np.zeros(num_groups, np.float32)
+        gmi = np.asarray(d['group_mask_index'])
+        fs = np.asarray(d['fastsam_scores'], np.float32)
+        has = gmi >= 0
+        conf[has] = fs[gmi[has]]
+        gt_arr = np.asarray(d['gt_instance_3d' if gt == '3d' else 'gt_instance'], np.int64)
+        out.append(FragmentFrame(scene=scene, frame_id=fid, xyz=np.asarray(d['xyz'], np.float32),
+                                 rgb=np.asarray(d['rgb'], np.float32), groups=groups,
+                                 node_feat=np.asarray(d['node_feat'], np.float32),
+                                 edges=np.asarray(d['edges'], np.int64),
+                                 edge_feat=np.asarray(d['edge_feat'], np.float32),
+                                 conf=conf, gt=gt_arr))
+    return out
+
+
+def oracle_frame_instances(fr, purity=0.8, eps=0.05):
+    """Per-frame oracle instances (GT merge of the frame's fragments) as a FrameInput.
+
+    Feature = point-weighted mean of the members' ``node_feat``; score = point-weighted mean
+    of the members' FastSAM confidence. This is what feeds the reference memories
+    (ESAM rule / QueryMemory), which take per-frame *instances* rather than fragments.
+    """
+    merged = oracle_merge_adjacent(fr.groups, fr.gt, fr.xyz, purity, eps)
+    masks, ids = groups_to_masks(merged)
+    num_groups = len(fr.node_feat)
+    row = np.searchsorted(ids, merged)
+    w = np.zeros((len(ids), num_groups), np.float32)
+    np.add.at(w, (row, fr.groups), 1.0)
+    wsum = np.maximum(w.sum(1, keepdims=True), 1)
+    feat = (w @ fr.node_feat) / wsum
+    score = ((w @ fr.conf) / wsum.ravel()).astype(np.float32)
+    return FrameInput(fr.xyz, masks, score, feat.astype(np.float32), fr.frame_id)

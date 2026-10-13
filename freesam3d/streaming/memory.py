@@ -23,7 +23,8 @@ import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 
-from .voxel import containment_from_counts, devoxelize, dilate_sets, iou_from_counts, mask_voxel_sets, overlap_matrix, voxelize
+from .voxel import (containment_from_counts, devoxelize, dilate_sets, iou_from_counts, mask_voxel_sets,
+                     overlap_matrix, render_voxel_table, voxelize)
 
 
 @dataclass
@@ -396,16 +397,7 @@ class QueryMemory:
                 idx_keep = torch.nonzero(keep).squeeze(1)[win]
                 keep = torch.zeros_like(keep); keep[idx_keep] = True
             order = torch.argsort(self.voxel[keep])
-            sv, so = self.voxel[keep][order], self.owner[keep][order]
-            lo = torch.searchsorted(sv, v, right=False)
-            hi = torch.searchsorted(sv, v, right=True)
-            has = hi > lo
-            # expand ranges (a voxel may be owned by several queries)
-            idx_pt = torch.repeat_interleave(torch.nonzero(has).squeeze(1), (hi - lo)[has])
-            starts = lo[has]; lens = (hi - lo)[has]
-            offs = torch.arange(int(lens.sum()), device=self.device) - torch.repeat_interleave(torch.cumsum(lens, 0) - lens, lens)
-            rec = torch.repeat_interleave(starts, lens) + offs
-            out[so[rec], idx_pt] = True
+            out = render_voxel_table(self.voxel[keep][order], self.owner[keep][order], K, v)
         return out.cpu().numpy(), self.score.cpu().numpy()
 
 

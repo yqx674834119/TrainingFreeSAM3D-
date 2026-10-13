@@ -54,6 +54,9 @@ TrainingFreeSAM3D/
 - 新增池化方式（如几何感知池化）：在 `freesam3d/lifting/pooling.py` 中新增函数，
   通过配置 `pooling.method` 选择；保留 `mean_l2` baseline 不删。
 - 一次性调试脚本放在会话临时目录，不要提交到仓库根目录。
+- **实验发现（可写进论文的结论）统一记录在 `docs/findings.zh-CN.md`**：每完成一个阶段
+  就追加一节（发现 + 证据 + 口径 + 出处），旧结论不删除；被推翻的结论就地标注「修正」。
+  这是本项目面向论文的唯一发现清单，与 `docs/stream_merge_v2*.md`（设计说明）分工不同。
 - 需要跑官方 ESAM 时，通过 `freesam3d/esam/` 调用，数据根目录放在本项目的
   `work_dirs/esam_eval/` 下。不要往 `/home/yqx/SegmentAnything3D/ESAM/data` 里写东西。
 - 任何可训练模块：先写 `tools/*_probe.py` 回答「输入是否有信号」再训练；阈值只在留出的
