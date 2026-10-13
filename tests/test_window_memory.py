@@ -190,3 +190,26 @@ def test_esam_online_merge_rule():
     m2.update(fr(a, 0.9, 0))
     m2.update(fr(c, 0.9, 1))                                           # disjoint: stays two instances
     assert len(m2.render(a)[0]) == 2
+
+
+def test_block_past_nodes_carry_one_row_of_additive_statistics():
+    """A past *block* is one node: its statistics are the sum of its fragments', not concatenated rows.
+
+    Regression guard: with ``past_unit='block'`` (the default) and ``window > 1`` the graph used to
+    hold more statistics rows than nodes, so a block's geometry / point count / feature were one
+    arbitrary member's, and ``node_n`` did not line up with ``node_kind``.
+    """
+    frames = _synth_frames(num_frames=4, seed=2)
+    mem = WindowMemory(WindowConfig(window=2), score_fn=oracle_scores, device='cpu')
+    for fr in frames:
+        mem.update(fr)
+        g = mem.last_graph
+        assert g.num_nodes == len(g.node_type) == len(g.node_n) == len(g.node_prev_obj)
+        assert g.node_geom.shape == (g.num_nodes, 11) and g.node_feat.shape[0] == g.num_nodes
+    # every block sums exactly the point counts of the fragments it covers
+    past = mem._past_nodes()
+    assert past and all(int(p['stats'].n.shape[0]) == 1 for p in past)
+    entry = {e['pos']: e for e in mem.window}
+    for p in past:
+        want = sum(int(entry[e]['frags'][j]['n']) for e, j in p['members'])
+        assert int(p['stats'].n.sum()) == want

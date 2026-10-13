@@ -11,6 +11,7 @@ overlap counts of the pair.
 """
 from dataclasses import dataclass, fields
 
+import numpy as np
 import torch
 
 from ..merging.graph import edge_feature_names
@@ -84,6 +85,15 @@ class NodeStats:
         return NodeStats(*[torch.cat([getattr(p, f.name) for p in parts], 0) for f in fields(NodeStats)])
 
     def select(self, idx):
+        """One-row (int) or multi-row (array) view.
+
+        An int goes through a slice on purpose: indexing a CUDA tensor with a Python list builds an
+        index tensor on the host for *every* field, and ``WindowMemory`` selects per-fragment stats
+        twice per frame, which showed up as ~1800 host->device copies per frame in the profiler.
+        """
+        if isinstance(idx, (int, np.integer)):
+            i = int(idx)
+            return NodeStats(*[getattr(self, f.name)[i:i + 1] for f in fields(NodeStats)])
         return NodeStats(*[getattr(self, f.name)[idx] for f in fields(NodeStats)])
 
     def add(self, other):

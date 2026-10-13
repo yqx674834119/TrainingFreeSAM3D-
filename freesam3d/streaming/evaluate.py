@@ -10,8 +10,8 @@ import os
 import numpy as np
 import torch
 
-from ..evaluation.instance import (GTSet, class_agnostic_ap, coverage_stats, fragments_per_gt,
-                                    groups_to_masks, oracle_merge_adjacent)
+from ..evaluation.instance import (GTSet, association_stats, class_agnostic_ap, coverage_stats,
+                                    fragments_per_gt, groups_to_masks, oracle_merge_adjacent)
 from .memory import FrameInput
 
 
@@ -114,12 +114,14 @@ def frames_from_merge_cache(files, gt='3d'):
         has = gmi >= 0
         conf[has] = fs[gmi[has]]
         gt_arr = np.asarray(d['gt_instance_3d' if gt == '3d' else 'gt_instance'], np.int64)
+        sem_key = 'gt_sem_3d' if gt == '3d' else 'gt_nyu40'
+        sem_arr = np.asarray(d[sem_key], np.int64) if sem_key in d else None
         out.append(FragmentFrame(scene=scene, frame_id=fid, xyz=np.asarray(d['xyz'], np.float32),
                                  rgb=np.asarray(d['rgb'], np.float32), groups=groups,
                                  node_feat=np.asarray(d['node_feat'], np.float32),
                                  edges=np.asarray(d['edges'], np.int64),
                                  edge_feat=np.asarray(d['edge_feat'], np.float32),
-                                 conf=conf, gt=gt_arr))
+                                 conf=conf, gt=gt_arr, sem=sem_arr))
     return out
 
 
@@ -140,3 +142,76 @@ def oracle_frame_instances(fr, purity=0.8, eps=0.05):
     feat = (w @ fr.node_feat) / wsum
     score = ((w @ fr.conf) / wsum.ravel()).astype(np.float32)
     return FrameInput(fr.xyz, masks, score, feat.astype(np.float32), fr.frame_id)
+
+def voxel_majority_gt(frames, voxel=0.05):
+    """Per-cell majority GT over a whole stream — the scene-level GT proxy of a scene with no mesh.
+
+    Every frame's points are quantised to ``voxel``-sized cells; a cell's instance is the majority
+    instance id among the labeled points that fall in it, its semantic id the majority semantic id.
+    Ties break towards the smaller id, the rule ``merging.labels.group_gt_votes`` already uses.
+    Returns ``(cells, instance, semantic)``: three aligned arrays over the sorted union of cells.
+    """
+    from .voxel import voxelize
+    vx, gt, sem = [], [], []
+    for fr in frames:
+        v = voxelize(np.asarray(fr.xyz, np.float32), voxel)
+        vx.append(v)
+        gt.append(np.asarray(fr.gt, np.int64))
+        sem.append(np.zeros(len(v), np.int64) if fr.sem is None else np.asarray(fr.sem, np.int64))
+    vx, gt, sem = np.concatenate(vx), np.concatenate(gt), np.concatenate(sem)
+    cells, inv = np.unique(vx, return_inverse=True)
+    lab = gt > 0
+
+    def majority(keys):
+        out = np.zeros(len(cells), np.int64)
+        if not lab.any():
+            return out
+        uniq, counts = np.unique(np.stack([inv[lab], keys[lab]], 1), axis=0, return_counts=True)
+        order = np.lexsort((uniq[:, 1], -counts, uniq[:, 0]))
+        c, k = uniq[order, 0], uniq[order, 1]
+        first = np.r_[True, c[1:] != c[:-1]]
+        out[c[first]] = k[first]
+        return out
+
+    return cells, majority(gt), majority(sem)
+
+
+def voxel_scene_eval(obj_voxels, scores, frames, stuff, voxel=0.05, min_gt_voxels=20,
+                     min_pred_voxels=20, device='cpu'):
+    """Scene-level class-agnostic AP against the voxel proxy GT, for scenes without a mesh.
+
+    Same protocol as :func:`scene_metrics` (thing GT, greedy matching by score, AP at 0.5 / 0.25,
+    mean best IoU, recall@0.5), but the point set is the scene's cells instead of ESAM's mesh
+    vertices and the GT is :func:`voxel_majority_gt`. Cells whose majority instance is stuff, or
+    that hold fewer than ``min_gt_voxels`` cells, are dropped — mirroring the mesh protocol's
+    ``min_gt_points`` vertices. Predictions are the memory's per-object voxel sets (no rendering).
+    """
+    cells, gt_vox, sem_vox = voxel_majority_gt(frames, voxel)
+    ids, counts = np.unique(gt_vox[gt_vox > 0], return_counts=True)
+    stuff = set(stuff)
+    keep = []
+    for k, n in zip(ids, counts):
+        if n < min_gt_voxels:
+            continue
+        s = sem_vox[gt_vox == k]
+        s = s[s > 0]
+        if len(s) and int(np.bincount(s).argmax()) in stuff:
+            continue
+        keep.append(int(k))
+    if not keep:
+        return dict(ap50=float('nan'), ap25=float('nan'), iou=0.0, r50=0.0, masks=0,
+                    voxels=int(len(cells)), gt_voxels=0)
+    gts = GTSet.from_labels(gt_vox, keep)
+    masks = np.zeros((len(obj_voxels), len(cells)), bool)
+    for i, v in enumerate(obj_voxels):
+        v = v.cpu().numpy() if torch.is_tensor(v) else np.asarray(v, np.int64)
+        if len(v) == 0:
+            continue
+        pos = np.clip(np.searchsorted(cells, v), 0, len(cells) - 1)
+        masks[i, pos[cells[pos] == v]] = True
+    met = scene_metrics(masks, np.asarray(scores, np.float32), gts, min_points=min_pred_voxels,
+                        device=device)
+    met.update(association_stats(masks, gts, device=device))
+    met['voxels'] = int(len(cells))
+    met['gt_voxels'] = int(len(keep))
+    return met

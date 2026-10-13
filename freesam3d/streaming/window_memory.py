@@ -19,6 +19,7 @@ import torch
 from ..merging.cluster import LINKAGE
 from ..merging.graph import edge_feature_names
 from ..merging.labels import group_gt_votes
+from . import two_step
 from .pair_features import NodeStats, pair_features
 from .voxel import dilate_sets, overlap_matrix, render_voxel_table, voxelize
 
@@ -34,6 +35,9 @@ class WindowConfig:
     admit_min_points: int = 100     # all-current group: below this many points no new object is opened
     object_merge: bool = True       # allow two frozen objects to merge inside one group
     purity: float = 0.8             # oracle scoring threshold
+    grouping: str = 'linkage'       # 'linkage' (stage 0/0c) | 'two_step' (stage 1: blocks, then block -> object)
+    cross_rule: str = 'p2a'         # two_step step 2: 'p2a' = block containment, 'p2b' = that x clamp(cos,0,1)
+    cross_threshold: float = 0.5    # two_step step 2 threshold (step 1 reuses ``threshold``)
 
 
 @dataclass
@@ -49,6 +53,7 @@ class FragmentFrame:
     edge_feat: np.ndarray      # (E,14) float32
     conf: np.ndarray           # (G,) float32, FastSAM confidence (0 for KMeans fill groups)
     gt: np.ndarray = None      # (N,) int64, 0 = unlabeled (oracle / training only)
+    sem: np.ndarray = None     # (N,) int64, semantic id in the same space as ``gt`` (stuff filter)
 
 
 @dataclass
@@ -102,6 +107,17 @@ def oracle_scores(graph, purity=0.8):
     a, b = graph.edges[:, 0], graph.edges[:, 1]
     ok = pure[a] & pure[b] & (graph.node_major[a] == graph.node_major[b])
     return torch.as_tensor(ok.astype(np.float32))
+
+
+def _sum_stats(parts):
+    """One row per node: a block's statistics are the *sum* of its fragments' (``NodeStats`` is additive).
+
+    ``NodeStats.cat`` concatenates rows and is only right where every part is already a single node.
+    """
+    out = parts[0]
+    for p in parts[1:]:
+        out = out.add(p)
+    return out
 
 
 def _fragment_voxels(groups, vox):
@@ -167,7 +183,7 @@ class WindowMemory:
         past = self._past_nodes()
         node_kind, node_stats, node_vox, node_votes, node_prev = [], [], [], [], []
         for i in range(num_cur):
-            node_kind.append(0); node_stats.append(stats_cur.select([i])); node_vox.append(f_vox_list[i])
+            node_kind.append(0); node_stats.append(stats_cur.select(i)); node_vox.append(f_vox_list[i])
             node_votes.append(votes_cur[i]); node_prev.append(-1)
         for p in past:
             node_kind.append(1); node_stats.append(p['stats']); node_vox.append(p['vox'])
@@ -249,11 +265,15 @@ class WindowMemory:
         prob = np.asarray(self.score_fn(graph).detach().cpu(), np.float64).reshape(-1)
         sync(); self.times['score_ms'] = (time.perf_counter() - t0) * 1e3
         sync(); t0 = time.perf_counter()
-        cluster = LINKAGE[cfg.linkage](num_nodes, graph.edges, prob, cfg.threshold)
+        cluster = None if cfg.grouping == 'two_step' else \
+            LINKAGE[cfg.linkage](num_nodes, graph.edges, prob, cfg.threshold)
         sync(); self.times['cluster_ms'] = (time.perf_counter() - t0) * 1e3
 
         sync(); t0 = time.perf_counter()
-        assign = self._assign(cluster, node_kind, node_prev, stats.n.cpu().numpy())
+        node_n = stats.n.cpu().numpy()
+        assign = (self._two_step_assign(graph, prob, node_prev, node_n, num_cur, n_own, n_vox,
+                                        f_vox_list, stats_cur)
+                  if cfg.grouping == 'two_step' else self._assign(cluster, node_kind, node_prev, node_n))
         for i, p in enumerate(past):                              # revise the window: re-glue past fragments
             obj = int(assign[num_cur + i])
             for wpos, fidx in p['members']:
@@ -263,9 +283,9 @@ class WindowMemory:
         for i in range(num_cur):
             if obj_of_frag[i] < 0:
                 continue
-            n_i = int(stats_cur.n[i])
+            n_i = int(node_n[i])          # node_n is already on the host (no per-fragment sync)
             entry['frags'].append({'idx': i, 'obj': int(obj_of_frag[i]), 'vox': f_vox_list[i],
-                                   'stats': stats_cur.select([i]), 'votes': votes_cur[i],
+                                   'stats': stats_cur.select(i), 'votes': votes_cur[i],
                                    'n': n_i, 'imp': n_i if purity[i] < cfg.purity else 0})
         self.window.append(entry)
         self._drop_empty()
@@ -302,7 +322,7 @@ class WindowMemory:
                     for k, c in m['votes'].items():
                         votes[k] = votes.get(k, 0) + c
                 out.append(dict(vox=torch.unique(torch.cat([m['vox'] for _, m in members])),
-                                stats=NodeStats.cat([m['stats'] for _, m in members]), votes=votes,
+                                stats=_sum_stats([m['stats'] for _, m in members]), votes=votes,
                                 prev_obj=obj, members=[(e['pos'], pos_in_list) for pos_in_list, _ in members]))
         return out
 
@@ -332,26 +352,79 @@ class WindowMemory:
             ka['votes_gt'][k] = ka['votes_gt'].get(k, 0) + c
         del self.objects[drop]
 
+    def _two_step_assign(self, graph, prob, node_prev, node_n, num_cur, n_own, n_vox, f_vox_list, stats_cur):
+        """Two-step grouping (``cfg.grouping == 'two_step'``): intra-frame blocks, then block -> object.
+
+        Step 1 clusters the current fragments with the cached intra-frame edges alone (the
+        GroupMergeNet probabilities at the per-frame threshold) into blocks; step 2 lets every block
+        join the object whose cells contain it best, when that containment passes
+        ``cfg.cross_threshold``. Past window nodes keep their object — there is no object-object
+        merge and no history revision — so with ``window = 1`` this is exactly "the blocks of this
+        frame go to the objects they touch". See ``streaming/two_step.py`` for why.
+        """
+        cfg, dev = self.cfg, self.device
+        sel = two_step.as_bool_np(graph.has_intra)
+        edges = np.asarray(graph.edges, np.int64).reshape(-1, 2)[sel]
+        block = two_step.intra_blocks(num_cur, edges, np.asarray(prob)[sel], cfg.threshold, cfg.linkage)
+        num_blocks = int(block.max()) + 1 if num_cur else 0
+        b_own, b_vox = two_step.block_voxel_sets(block, f_vox_list, dev)
+        b_n = np.bincount(block, weights=node_n[:num_cur], minlength=num_blocks)
+        b_feat = two_step.block_features(block, num_blocks, stats_cur.feat().cpu().numpy(),
+                                         node_n[:num_cur], dev)
+        cand_ids, c_own, c_vox, c_feat = two_step.object_candidates(node_prev, n_own, n_vox,
+                                                                    graph.node_feat, node_n, dev)
+        score = two_step.block_object_scores(b_own, b_vox, b_feat, c_own, c_vox, c_feat, cfg.cross_rule)
+        block_obj = two_step.assign_blocks(score, cand_ids, b_n, cfg.cross_threshold,
+                                           cfg.admit_min_points, self._new_object)
+        prev = np.asarray(node_prev, np.int64)
+        out = np.full(len(prev), -1, np.int64)
+        out[prev >= 0] = prev[prev >= 0]
+        out[:num_cur] = block_obj[block]
+        return out
+
     def _assign(self, cluster, node_kind, node_prev, node_n):
         """One object id per node: frozen wins (smallest id), else past-majority, else a new object."""
         cfg = self.cfg
-        kind, prev = np.asarray(node_kind), np.asarray(node_prev)
+        kind = np.asarray(node_kind)
+        prev = np.asarray(node_prev, np.int64)
+        n = np.asarray(node_n, np.float64)
+        num_g = int(cluster.max()) + 1 if len(cluster) else 0
         out = np.full(len(cluster), -1, np.int64)
-        for g in np.unique(cluster):
-            idx = np.where(cluster == g)[0]
-            froz = idx[kind[idx] == 2]
-            if len(froz):
-                obj = int(prev[froz].min())
-                for other in prev[froz]:
-                    self._merge_objects(obj, int(other))
-            elif (kind[idx] == 1).any():
-                tally = {}
-                for i in idx[kind[idx] == 1]:
-                    tally[int(prev[i])] = tally.get(int(prev[i]), 0.0) + float(node_n[i])
-                obj = max(tally, key=lambda k: (tally[k], -k))     # tie -> smaller object id
-            else:
-                obj = self._new_object() if float(node_n[idx].sum()) >= cfg.admit_min_points else -1
-            out[idx] = obj
+        if num_g == 0:
+            return out
+        # 1) clusters holding a frozen object: it wins, and several frozen objects merge into the
+        #    smallest of their ids. Per-cluster aggregates come from one pass, not a Python loop.
+        fz = kind == 2
+        NONE = np.iinfo(np.int64).max
+        fz_min = np.full(num_g, NONE, np.int64)
+        if fz.any():
+            np.minimum.at(fz_min, cluster[fz], prev[fz])
+        has_fz = fz_min != NONE
+        # 2) otherwise the point-weighted majority of the cluster's past nodes (tie -> smaller id).
+        #    Point counts are exact integers in float64, so the arg-max is not a rounding question.
+        past = kind == 1
+        past_obj = np.zeros(num_g, np.int64)
+        has_past = np.zeros(num_g, bool)
+        if past.any():
+            ids, inv = np.unique(prev[past], return_inverse=True)
+            tally = np.zeros((num_g, len(ids)))
+            np.add.at(tally, (cluster[past], inv), n[past])
+            past_obj, has_past = ids[tally.argmax(1)], tally.max(1) > 0
+        # 3) everything else: a new object when the group is big enough, else unassigned
+        obj = np.where(has_fz, fz_min, np.where(has_past, past_obj, -1))
+        total = np.bincount(cluster, weights=n, minlength=num_g)
+        for g in np.flatnonzero(~has_fz & ~has_past):
+            obj[g] = self._new_object() if total[g] >= cfg.admit_min_points else -1
+        if fz.any():
+            order = np.argsort(cluster[fz], kind='stable')
+            fc, fp = cluster[fz][order], prev[fz][order]
+            starts = np.r_[0, np.flatnonzero(fc[1:] != fc[:-1]) + 1, len(fc)]
+            for s, e in zip(starts[:-1], starts[1:]):
+                ids = np.unique(fp[s:e])
+                if len(ids) > 1:                      # a single frozen object is already the target
+                    for other in ids:
+                        self._merge_objects(int(obj[fc[s]]), int(other))
+        out[:] = obj[cluster]
         return out
 
     def _freeze(self, entry):

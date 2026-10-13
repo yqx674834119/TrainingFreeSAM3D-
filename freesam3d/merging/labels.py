@@ -77,8 +77,12 @@ def group_gt_votes(groups, gt, num_groups):
     additive statistic accumulated over the fragments that were glued into it.
     """
     lab = gt > 0
-    pairs = np.stack([groups[lab], gt[lab]], 1)
-    if len(pairs) == 0:
+    if not lab.any():
         return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64)
-    uniq, counts = np.unique(pairs, axis=0, return_counts=True)
-    return uniq[:, 0].astype(np.int64), uniq[:, 1].astype(np.int64), counts.astype(np.int64)
+    g = np.asarray(groups)[lab].astype(np.int64)
+    k = np.asarray(gt)[lab].astype(np.int64)
+    # one packed key per (group, instance) pair: a 1-D unique sorts ~10x faster than np.unique(axis=0)
+    # on the same rows, and produces the same lexicographic order.
+    span = int(k.max()) + 1
+    key, counts = np.unique(g * span + k, return_counts=True)
+    return key // span, key % span, counts.astype(np.int64)

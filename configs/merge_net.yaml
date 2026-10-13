@@ -98,3 +98,15 @@ stream_v2:
   object_merge: true       # 允许两个定稿物体在同一组里合并（历史纠错）
   purity: 0.8              # 第 0 阶段 oracle 打分：两端纯度 >= 此值且多数 GT 相同才粘
   out_root: work_dirs/stream_v2
+  holdout_scenes:          # 第 1 阶段留出：训练列表（1201 个场景，不含 16 个验证场景）排序后的最后 60 个。
+                           # 只写一次；此后所有阈值标定 / 方案选择只用它们，16 个验证场景只做最终报告。
+    [scene0656_03, scene0657_00, scene0659_00, scene0659_01, scene0661_00, scene0662_00,
+     scene0662_01, scene0662_02, scene0666_00, scene0666_01, scene0666_02, scene0667_00,
+     scene0667_01, scene0667_02, scene0668_00, scene0669_00, scene0669_01, scene0672_00,
+     scene0672_01, scene0673_00, scene0673_01, scene0673_02, scene0673_03, scene0673_04,
+     scene0673_05, scene0674_00, scene0674_01, scene0675_00, scene0675_01, scene0676_00,
+     scene0676_01, scene0677_00, scene0677_01, scene0677_02, scene0679_00, scene0679_01,
+     scene0680_00, scene0680_01, scene0681_00, scene0682_00, scene0683_00, scene0687_00,
+     scene0688_00, scene0691_00, scene0691_01, scene0692_00, scene0692_01, scene0692_02,
+     scene0692_03, scene0692_04, scene0694_00, scene0694_01, scene0698_00, scene0698_01,
+     scene0703_00, scene0703_01, scene0705_00, scene0705_01, scene0705_02, scene0706_00]

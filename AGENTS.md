@@ -33,7 +33,10 @@ TrainingFreeSAM3D/
 │   │                       #     mask 质量打分器(scorer, proposal_data)
 │   ├── streaming/          #   流式场景级 Query Memory（对标 ESAM OnlineMerge）：体素哈希与稀疏交并(voxel)、
 │   │                       #     QueryMemory(memory)、跨帧特征投影头(projection)、匹配打分器(matcher)、
-│   │                       #     场景级评估与 mesh-segment 平滑(evaluate)
+│   │                       #     场景级评估与 mesh-segment 平滑(evaluate)、窗口记忆与统一帧内/跨帧图
+│   │                       #     (window_memory, pair_features, window_scores)、两步式分组(two_step)、
+│   │                       #     ESAM 规则重写(esam_merge)、输出端后处理(postprocess)、
+│   │                       #     混合碎片去向(fragment_fate)、留出场景评估与探针(holdout, window_probe)
 │   └── vis/                #   所有画图/导出 PLY 的代码
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）

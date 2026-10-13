@@ -110,3 +110,36 @@ def window_score_fn(model=None, std=None, rule='p2a', device='cpu'):
         return prob
 
     return score_fn
+
+def calibrated_score_fn(model=None, std=None, rule='p2a', device='cpu', intra_threshold=0.65,
+                        cross_threshold=0.5):
+    """Every edge as a yes/no at *its own* calibrated threshold (stage 1, the minimal fix).
+
+    Stage 0c's diagnosis (F0c.7) is that the checkpoint's 0.65 is an edge-probability threshold
+    while the cross-frame rule emits a geometric containment: one number cannot calibrate both, and
+    ``average_linkage`` then averages a cluster's edges across two different scales. Here an
+    intra-frame edge becomes ``model_prob >= intra_threshold`` and a cross-frame edge
+    ``rule >= cross_threshold``, so a cluster pair merges (at linkage threshold 0.5) exactly when
+    the majority of the edges between the two clusters are positive on their own scale.
+
+    With ``model=None`` every edge is scored by the rule at ``cross_threshold``.
+    """
+    if rule not in RULES:
+        raise ValueError(f'unknown rule {rule!r}')
+
+    def score_fn(graph):
+        prob = torch.zeros(len(graph.edges), device=graph.pair_feat.device)
+        sel = _bool_np(graph.has_intra)
+        cross = ~sel
+        if model is not None and sel.any():
+            m = intra_scores(graph, model, std, device)
+            prob[torch.as_tensor(sel, device=prob.device)] = \
+                (m[torch.as_tensor(sel, device=m.device)] >= float(intra_threshold)).to(prob.dtype)
+        if model is None or cross.any():
+            r = rule_scores(graph, rule).to(prob.device)
+            want = cross if model is not None else np.ones(len(prob), bool)
+            w = torch.as_tensor(want, device=prob.device)
+            prob[w] = (r[w] >= float(cross_threshold)).to(prob.dtype)
+        return prob
+
+    return score_fn
