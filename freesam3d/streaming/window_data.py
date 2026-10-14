@@ -22,7 +22,7 @@ import torch
 
 from ..merging.cache import majority_semantic
 from ..merging.labels import group_gt_votes, group_purity, objectness_labels
-from .pair_features import pair_feature_names
+from .pair_features import pair_feature_names, rel_feature_names
 from .unified_flow import N_PAIR, make_unified_memory, object_state
 from .voxel import dilate_sets, overlap_matrix, voxelize
 from .window_memory import stats_from_frame
@@ -108,7 +108,8 @@ def intra_frame_graph(fr, voxel=0.05, dilation=1, device='cpu'):
                        edge_feat=torch.as_tensor(np.asarray(fr.edge_feat, np.float32), device=device))
     return dict(node_geom=stats.geom(z_ref).cpu().numpy(), node_feat=stats.feat().cpu().numpy(),
                 n_frames=np.ones(num, np.float32), age=np.zeros(num, np.float32), edges=edges,
-                pair_feat=pf.cpu().numpy())
+                pair_feat=pf.cpu().numpy(),
+                node_rel=np.zeros((num, len(rel_feature_names())), np.float32))
 
 
 def collect_intra_frame(fr, stuff, purity=POS_PURITY, min_labeled=MIN_LABELED, voxel=0.05,
@@ -217,7 +218,8 @@ def collect_scene(frames, cfg, model, std, device, stuff, purity=POS_PURITY, min
         ny_i, nv_i = objectness_labels(major_f, pur_f, labfrac_f, sem_f, stuff, purity, min_labeled)
         rows_i.append(dict(**ia, node_type=np.zeros(len(ia['node_geom']), np.int64),
                            edge_type=np.zeros(len(ia['edges']), np.int64), edge_y=y_i, edge_valid=v_i,
-                           node_y=ny_i.astype(np.float32), node_valid=nv_i))
+                           node_y=ny_i.astype(np.float32), node_valid=nv_i,
+                           node_rel=np.zeros((len(ia['node_geom']), len(rel_feature_names())), np.float32)))
 
         cg, nb, n_obj = info['cross'], int(info['num_blocks']), len(info['obj_ids'])
         block_votes = [dict() for _ in range(nb)]
@@ -275,7 +277,7 @@ def pack(rows_i, rows_c, niou, niou_valid, scene='', feat_dim=0, frames=None):
             edge_ptr = np.concatenate([edge_ptr, np.full(nf + 1 - len(edge_ptr), edge_ptr[-1], np.int64)])
 
         def cat(key, dtype, dim):
-            parts = [np.asarray(r[key], dtype) for r in rows]
+            parts = [np.asarray(r[key], dtype) for r in rows if key in r]
             parts = [p for p in parts if p.ndim > 1 or p.size]
             if not parts:
                 return np.zeros((0, dim), dtype) if dim else np.zeros(0, dtype)
@@ -294,6 +296,7 @@ def pack(rows_i, rows_c, niou, niou_valid, scene='', feat_dim=0, frames=None):
         out[f'ev_{tag}'] = cat('edge_valid', bool, 0)
         out[f'ny_{tag}'] = cat('node_y', np.float32, 0)
         out[f'nv_{tag}'] = cat('node_valid', bool, 0)
+        out[f'rel_{tag}'] = cat('node_rel', np.float32, len(rel_feature_names()))
     out['niou_c'] = np.asarray(niou, np.float32)
     out['niou_valid_c'] = np.asarray(niou_valid, bool)
     return out

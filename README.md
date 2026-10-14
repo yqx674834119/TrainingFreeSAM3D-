@@ -10,7 +10,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | Query Lifting | `freesam3d/lifting/` | ✅ baseline 完成 |
 | Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
 | 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
-| 统一 MergeNet（帧内 + 跨帧 + 物体合并 + 节点排序，一个模型） | `freesam3d/streaming/unified_flow.py`, `unified_train.py`, `merging/model.py` | ✅ 已完成：16 场景 AP50 0.422（旧管线 0.311、ESAM 0.589），见下与 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) |
+| 统一 MergeNet（帧内 + 跨帧 + 物体合并 + 节点排序，一个模型） | `freesam3d/streaming/unified_flow.py`, `unified_train.py`, `merging/model.py` | ✅ 已完成：16 场景 AP50 0.422（旧管线 0.311、ESAM 0.589）；第 3 阶段（排序诊断 + 包含度去重）同水平——masks 74→60、dup_rate 0.24→0.17、AP 中性，见下与 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) |
 | 提议打分（从 FastSAM mask 层级里选） | `freesam3d/merging/proposals.py`, `scorer.py` | ✅ 见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md) |
 | Query Merging（跨帧，流式 Query Memory） | `freesam3d/streaming/` | ✅ 见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md) |
 | CVPR 投稿规划 | [docs/cvpr_plan.zh-CN.md](docs/cvpr_plan.zh-CN.md) | 📝 方法与实验设计初稿 |
@@ -95,6 +95,20 @@ object-object 1.01（第 3 步关掉）。16 个验证场景、ESAM 网格协议
 GroupMergeNet 0.6340（门槛 ≥0.62），即没有丢掉帧内能力。逐帧耗时 49.5 ms（阶段 2 模块），加 FastSAM 约 72 ms
 ≈ 120 ms/帧。四个问题的完整回答见 `work_dirs/stream_v2/phase2/summary.md`，逐条发现见
 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的 F2.1–F2.14。
+
+## 统一 MergeNet · 第 3 阶段（摘要）
+
+不换模型，回答"排序头为什么只学到 41%"并做免费清理。**诊断**：质量头对真实 IoU 的相关在训练图上
+0.687、留出上 0.608（只差 0.08）→ 不是过拟合，是节点侧信息不足；排在最前的错误答案里重复为 0。
+**去重**（NMS 后丢"被更高分 mask 包含 ≥0.7"的 mask，阈值在留出上选）：16 场景 masks 74.4→60.2、
+dup_rate 0.240→0.168、frags/GT 1.21→0.97，AP50 0.422→0.413（留出 +0.003，方向不一致、都小）→
+清 mask 免费，AP 中性。**关系线索**（8 列物体间关系 + 场景内成对排序损失）：三种接线在留出上都不
+高于 baseline（最好的 relq 0.2899 vs 0.3031；拼进共享主干会经边决策把 mask 弄坏），不纳入。
+**扩候选**（接触膨胀 2、质心+外观规则）无正贡献，不纳入。**物体级自注意力**：条件（留出 ≥+0.03）
+未满足，未加（已实现并冒烟验证）。最终配置 A 轮 seed0 @0.75/0.60/1.01 + 去重 0.7；排序头吃到约
+38% 的完美排序空间，oracle 上界 0.636 仍高于 ESAM 0.589——差距结构与第 2 阶段一致。耗时 53.6 ms/帧
+（阶段 3 模块）。完整回答见 `work_dirs/stream_v2/phase3/summary.md`，逐条发现见
+[docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的「阶段 3」（F3.1–F3.6）。
 
 ## 模块 1：Query Lifting
 

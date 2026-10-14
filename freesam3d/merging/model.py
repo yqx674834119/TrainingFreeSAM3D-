@@ -96,13 +96,46 @@ def build_model(kind, geom_dim, feat_dim, edge_dim, cfg):
     raise KeyError(f'unknown model kind {kind!r}')
 
 
+class ObjectAttention(nn.Module):
+    """One self-attention round over the *object* nodes of each frame (stage 3, ranking only).
+
+    Rows flagged in ``obj`` attend to each other within the same ``frame_id`` segment (``None`` =
+    every node is in one frame, which is what inference does); all other rows pass through
+    unchanged. Single head on a narrow inner width, so the whole layer stays in the
+    few-thousand-parameter budget the stage-3 brief allows.
+    """
+
+    def __init__(self, dim, inner=32, dropout=0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.proj_in = nn.Linear(dim, inner)
+        self.q = nn.Linear(inner, inner, bias=False)
+        self.k = nn.Linear(inner, inner, bias=False)
+        self.v = nn.Linear(inner, inner, bias=False)
+        self.proj_out = nn.Linear(inner, dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, h, obj, frame_id=None):
+        if not bool(obj.any()):
+            return h
+        z = self.proj_in(self.norm(h[obj]))
+        q, k, v = self.q(z), self.k(z), self.v(z)
+        logits = (q @ k.t()) * (q.shape[-1] ** -0.5)
+        fid = (torch.zeros(len(h), dtype=torch.int64, device=h.device) if frame_id is None
+               else frame_id.long())[obj]
+        logits = logits.masked_fill(fid[:, None] != fid[None, :], float('-inf'))
+        out = h[obj] + self.drop(self.proj_out(torch.softmax(logits, dim=1) @ v))
+        return h.index_copy(0, torch.nonzero(obj).squeeze(1), out)
+
+
 class UnifiedMergeNet(nn.Module):
     """One small model for the whole merge task (stage 2): intra-frame edges, block <-> object edges,
     object <-> object edges, plus a per-node *quality* head (predicted IoU with the GT instance,
     used as the object ranking score at output time).
 
     Node input : [node_geom(11), P . feat(C -> feature_proj), node-type one-hot(3),
-                  log1p(n_frames), log1p(age)]
+                  log1p(n_frames), log1p(age)]; the stage-3 relational columns (``rel_dim``)
+                  are added to the *quality* head's input only, never to the shared trunk
     Edge input : [h_a + h_b, |h_a - h_b|, LayerNorm(edge_feat), edge-type one-hot(3)]
                  ``edge_feat`` is the 29-column pair layout: the 14 cached intra-frame columns
                  (zero off intra-frame edges) followed by the 15 cross-frame columns, which are
@@ -116,15 +149,21 @@ class UnifiedMergeNet(nn.Module):
     NODE_TYPES = 3       # 0 current-frame fragment, 1 current-frame block, 2 history object
     EDGE_TYPES = 3       # 0 intra-frame, 1 block <-> object, 2 object <-> object
 
-    def __init__(self, geom_dim, feat_dim, edge_dim, hidden=64, feature_proj=16, dropout=0.1):
+    def __init__(self, geom_dim, feat_dim, edge_dim, hidden=64, feature_proj=16, dropout=0.1,
+                 rel_dim=0, attn_layers=0, attn_inner=32):
         super().__init__()
         self.proj = nn.Linear(feat_dim, feature_proj)
+        self.rel_dim = int(rel_dim)
+        self.attn_layers = int(attn_layers)
         self.node = _mlp(geom_dim + feature_proj + self.NODE_TYPES + 2, hidden, hidden, dropout)
+        self.rel_emb = nn.Linear(self.rel_dim, hidden) if self.rel_dim else None
         self.edge_norm = nn.LayerNorm(edge_dim)
         self.edge = _mlp(2 * hidden + edge_dim + self.EDGE_TYPES, hidden, hidden, dropout)
         self.msg = _mlp(hidden, hidden, hidden, dropout)
         self.head = nn.Linear(hidden, 1)
         self.quality = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Linear(hidden // 2, 1))
+        self.attn = nn.ModuleList(ObjectAttention(hidden, attn_inner, dropout)
+                                  for _ in range(self.attn_layers))
         self.node_dim = geom_dim + feature_proj + self.NODE_TYPES + 2
         self.edge_dim = edge_dim
 
@@ -133,11 +172,26 @@ class UnifiedMergeNet(nn.Module):
         return torch.cat([geom, self.proj(feat), oh,
                           torch.log1p(n_frames)[:, None], torch.log1p(age)[:, None]], 1)
 
-    def forward(self, geom, feat, edges, edge_feat, node_type, n_frames, age, edge_type):
-        """-> (edge_logit (E,), quality_logit (G,)). An empty ``edges`` gives a node-only call."""
+    def quality_input(self, h, rel=None):
+        """The quality head's node input: the plain embedding plus the stage-3 relational columns.
+
+        The cues are added *here* - never to the shared trunk - so they can move the ranking
+        without touching the edge decisions (the merge behaviour stays exactly the stage-2 one).
+        """
+        return h if (rel is None or self.rel_emb is None) else h + self.rel_emb(rel)
+
+    def forward(self, geom, feat, edges, edge_feat, node_type, n_frames, age, edge_type,
+                rel=None, frame_id=None):
+        """-> (edge_logit (E,), quality_logit (G,)). An empty ``edges`` gives a node-only call.
+
+        ``rel`` (G, rel_dim) carries the stage-3 relational node columns; ``frame_id`` (G,) marks
+        which frame each node belongs to (a training batch holds several frames; ``None`` = one
+        frame). Both reach the *quality* head alone - ``rel`` through an additive embedding, the
+        attention through its mask - so the edge decisions keep reading the plain embedding.
+        """
         h = self.node(self.node_input(geom, feat, node_type, n_frames, age))
         if len(edges) == 0:
-            return h.new_empty((0,)), self.quality(h).squeeze(1)
+            return h.new_empty((0,)), self.quality(self._attend(self.quality_input(h, rel), node_type, frame_id)).squeeze(1)
         a, b = edges[:, 0].long(), edges[:, 1].long()
         et = torch.nn.functional.one_hot(edge_type.long(), self.EDGE_TYPES).to(h.dtype)
         ef = self.edge_norm(edge_feat)
@@ -146,7 +200,16 @@ class UnifiedMergeNet(nn.Module):
         deg = torch.bincount(torch.cat([a, b]), minlength=len(h)).clamp_min(1).unsqueeze(1)
         h = h + agg / deg
         e = self.edge(torch.cat([h[a] + h[b], (h[a] - h[b]).abs(), ef, et], 1))
-        return self.head(e).squeeze(1), self.quality(h).squeeze(1)
+        return self.head(e).squeeze(1), self.quality(self._attend(self.quality_input(h, rel), node_type, frame_id)).squeeze(1)
+
+    def _attend(self, h, node_type, frame_id):
+        """Object-level self-attention rounds (no-op with ``attn_layers == 0``)."""
+        if not self.attn_layers:
+            return h
+        obj = node_type.long() == self.NODE_TYPES - 1
+        for layer in self.attn:
+            h = layer(h, obj, frame_id)
+        return h
 
     def num_params(self):
         return sum(p.numel() for p in self.parameters())

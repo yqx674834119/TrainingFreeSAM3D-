@@ -77,10 +77,19 @@ class FrameSet:
 
 
 class Standardizer:
-    """Per-column mean/std of node geometry and edge features, fitted on the training split."""
-    def __init__(self, geom, ef):
+    """Per-column mean/std of node geometry and edge features, fitted on the training split.
+
+    ``rel`` (optional) adds the stage-3 relational node columns: their statistics are stored as
+    ``rm`` / ``rs`` and applied by ``apply_rel``; a standardizer built without them (every stage-2
+    checkpoint) keeps ``rm = rs = None`` and ``apply_rel`` is the identity.
+    """
+    def __init__(self, geom, ef, rel=None):
         self.gm, self.gs = geom.mean(0), geom.std(0) + 1e-6
         self.em, self.es = ef.mean(0), ef.std(0) + 1e-6
+        if rel is not None and len(rel):
+            self.rm, self.rs = rel.mean(0), rel.std(0) + 1e-6
+        else:
+            self.rm = self.rs = None
 
     @classmethod
     def fit(cls, frameset):
@@ -88,14 +97,25 @@ class Standardizer:
                    np.concatenate([f['edge_feat'] for f in frameset.frames]))
 
     def state(self):
-        return dict(gm=self.gm, gs=self.gs, em=self.em, es=self.es)
+        s = dict(gm=self.gm, gs=self.gs, em=self.em, es=self.es)
+        if self.rm is not None:
+            s.update(rm=self.rm, rs=self.rs)
+        return s
 
     @classmethod
     def from_state(cls, s):
         o = cls.__new__(cls)
         o.gm, o.gs, o.em, o.es = (np.asarray(s[k], np.float32) for k in ('gm', 'gs', 'em', 'es'))
+        o.rm = np.asarray(s['rm'], np.float32) if 'rm' in s else None
+        o.rs = np.asarray(s['rs'], np.float32) if 'rs' in s else None
         return o
 
     def apply(self, geom, ef):
         return (geom - torch.as_tensor(self.gm, device=geom.device)) / torch.as_tensor(self.gs, device=geom.device), \
                (ef - torch.as_tensor(self.em, device=ef.device)) / torch.as_tensor(self.es, device=ef.device)
+
+    def apply_rel(self, rel):
+        """Standardize the (G, R) relational columns; identity without fitted statistics."""
+        if self.rm is None:
+            return rel
+        return (rel - torch.as_tensor(self.rm, device=rel.device)) / torch.as_tensor(self.rs, device=rel.device)

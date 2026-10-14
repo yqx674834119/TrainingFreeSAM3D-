@@ -33,7 +33,8 @@ import torch
 
 from ..merging.graph import edge_feature_names
 from . import two_step
-from .pair_features import NodeStats, pair_feature_names, pair_features
+from .pair_features import (NodeStats, node_relations, pair_feature_names, pair_features,
+                            rel_feature_names)
 from .voxel import dilate_sets, overlap_matrix
 
 # node types: 0 current-frame fragment, 1 current-frame block, 2 history object
@@ -116,19 +117,25 @@ class UnifiedGrouping:
         self.model, self.std, self.device = model, std, device
 
     @torch.no_grad()
-    def forward_graph(self, stats, z_ref, node_type, edges, edge_feat, edge_type, n_frames, age):
+    def forward_graph(self, stats, z_ref, node_type, edges, edge_feat, edge_type, n_frames, age, rel=None):
         """One model call on a (nodes, edges) selection.
 
         Returns ``(edge probability, node quality, node_geom, node_feat)`` - the last two are the
-        *unstandardised* node inputs, which the data collector stores verbatim.
+        *unstandardised* node inputs, which the data collector stores verbatim. ``rel`` (G, 8) is
+        the stage-3 relational node block; it is standardised and passed only to models that take
+        it (``rel_dim > 0``), so the stage-2 adapters keep their eight-argument contract.
         """
         dev = self.device
         geom, feat = stats.geom(z_ref), stats.feat()
         geom_s, ef_s = self.std.apply(geom, edge_feat)
         t = lambda x, dt: (x.to(device=dev, dtype=dt) if torch.is_tensor(x)
                            else torch.as_tensor(np.asarray(x), dtype=dt, device=dev))
-        logit, q = self.model(geom_s, feat, t(edges, torch.int64), ef_s, t(node_type, torch.int64),
-                              t(n_frames, torch.float32), t(age, torch.float32), t(edge_type, torch.int64))
+        args = (geom_s, feat, t(edges, torch.int64), ef_s, t(node_type, torch.int64),
+                t(n_frames, torch.float32), t(age, torch.float32), t(edge_type, torch.int64))
+        rel_s = None
+        if rel is not None and int(getattr(self.model, 'rel_dim', 0)) > 0:
+            rel_s = self.std.apply_rel(rel) if hasattr(self.std, 'apply_rel') else rel
+        logit, q = self.model(*args, rel_s) if rel_s is not None else self.model(*args)
         return torch.sigmoid(logit), torch.sigmoid(q), geom, feat
 
     def assign(self, mem, graph, node_prev, node_n, num_cur, n_own, n_vox, f_vox_list, stats_cur, pos):
@@ -178,7 +185,8 @@ class UnifiedGrouping:
                         cross=dict(edges=np.zeros((0, 2), np.int64), pair_feat=np.zeros((0, N_PAIR), np.float32),
                                    node_geom=np.zeros((0, 11), np.float32), node_feat=np.zeros((0, mem.feat_dim), np.float32),
                                    node_type=np.zeros(0, np.int64), n_frames=np.zeros(0, np.float32),
-                                   age=np.zeros(0, np.float32)))
+                                   age=np.zeros(0, np.float32),
+                                   node_rel=np.zeros((0, len(rel_feature_names())), np.float32)))
             return np.full(graph.num_nodes, -1, np.int64), info
         cross_stats = parts[0] if len(parts) == 1 else NodeStats.cat(parts)
         node_type_c = np.r_[np.full(num_blocks, BLOCK, np.int64), np.full(num_obj, OBJECT, np.int64)]
@@ -204,6 +212,15 @@ class UnifiedGrouping:
         iu = torch.triu_indices(n_cross, n_cross, 1, device=dev)
         a, b = iu[0], iu[1]
         keep = inter1[a, b] > 0
+        if cfg.cand_dist is not None and cfg.cand_cos is not None:
+            # stage 3 candidate expansion: a block <-> object pair counts as a candidate even
+            # without voxel contact when the centroids are close and the appearance matches (the
+            # "the object exists but is not a candidate" failure of the stage-2 probe)
+            cent, feat_c = cross_stats.centroid(), cross_stats.feat()
+            near = ((cent[a] - cent[b]).norm(dim=1) < float(cfg.cand_dist)) & \
+                   ((feat_c[a] * feat_c[b]).sum(1) > float(cfg.cand_cos))
+            near &= (a < num_blocks) != (b < num_blocks)   # block <-> object pairs only
+            keep |= near
         if num_blocks:                                       # block <-> block: decided by step 1
             keep &= ~((a < num_blocks) & (b < num_blocks))
         a, b = a[keep], b[keep]
@@ -215,8 +232,17 @@ class UnifiedGrouping:
                              torch.zeros(len(a), dtype=torch.bool, device=dev),
                              torch.zeros(len(a), dtype=torch.bool, device=dev),
                              (a >= num_blocks).float() + (b >= num_blocks).float())
+        join = torch.zeros((n_cross, 3), device=dev)         # stage-3 join statistics per node
+        for k, oid in enumerate(obj_ids):
+            rec = mem.objects[oid]
+            join[num_blocks + k, 0] = float(rec.get('join_n', 0))
+            join[num_blocks + k, 1] = float(rec.get('join_sum', 0.0))
+            join[num_blocks + k, 2] = float(rec.get('join_min', 1.0))
+        rel = node_relations(cross_stats, a, b, inter0[a, b], size_c,
+                             torch.as_tensor(node_type_c, device=dev), join)
         prob_c, q_c, geom_c, feat_c = self.forward_graph(
-            cross_stats, graph.z_ref, node_type_c, torch.stack([a, b], 1), pf_c, etype, n_frames_c, age_c)
+            cross_stats, graph.z_ref, node_type_c, torch.stack([a, b], 1), pf_c, etype, n_frames_c, age_c,
+            rel=rel)
         prob_c, q_c = prob_c.cpu().numpy(), q_c.cpu().numpy()
         times['score_ms'] += (time.perf_counter() - t0) * 1e3
 
@@ -230,8 +256,15 @@ class UnifiedGrouping:
             m = etype == BLOCK_OBJECT
             b2o[a.cpu().numpy()[m], b.cpu().numpy()[m] - num_blocks] = prob_c[m]
             best = b2o.argmax(1)
-            ok = b2o.max(1) >= t_bo
+            best_p = b2o.max(1)
+            ok = best_p >= t_bo
             block_obj[ok] = np.asarray(obj_ids, np.int64)[best[ok]]
+            for bi in np.flatnonzero(ok):                    # stage-3 join statistics (a node input)
+                rec = mem.objects[int(block_obj[bi])]
+                p = float(best_p[bi])
+                rec['join_n'] = int(rec.get('join_n', 0)) + 1
+                rec['join_sum'] = float(rec.get('join_sum', 0.0)) + p
+                rec['join_min'] = min(float(rec.get('join_min', 1.0)), p)
         # ---- step 3: touching objects whose edge passes the threshold merge into the smallest id
         remap = {int(o): int(o) for o in obj_ids}
         merged = []
@@ -296,7 +329,7 @@ class UnifiedGrouping:
                     cross=dict(edges=np.stack([a.cpu().numpy(), b.cpu().numpy()], 1),
                                pair_feat=pf_c.cpu().numpy(), node_geom=geom_c.cpu().numpy(),
                                node_feat=feat_c.cpu().numpy(), node_type=node_type_c,
-                               n_frames=n_frames_c, age=age_c))
+                               n_frames=n_frames_c, age=age_c, node_rel=rel.cpu().numpy()))
         return out, info
 
 
@@ -305,6 +338,9 @@ class IdentityStandardizer:
 
     def apply(self, geom, ef):
         return geom, ef
+
+    def apply_rel(self, rel):
+        return rel
 
     def state(self):
         return {}
@@ -393,6 +429,7 @@ def make_unified_memory(cfg, model, std, device, **overrides):
     kw = dict(window=1, past_unit=wc['past_unit'], voxel=wc['voxel'], touch_dilation=wc['touch_dilation'],
               linkage=wc['linkage'], admit_min_points=wc['admit_min_points'],
               object_merge=bool(wc['object_merge']), purity=wc['purity'], grouping='unified',
-              threshold=wc['threshold'], cross_threshold=wc['threshold'])
+              threshold=wc['threshold'], cross_threshold=wc['threshold'],
+              cand_dist=wc.get('cand_dist'), cand_cos=wc.get('cand_cos'))
     kw.update(overrides)
     return WindowMemory(WindowConfig(**kw), unified=UnifiedGrouping(model, std, device), device=device)

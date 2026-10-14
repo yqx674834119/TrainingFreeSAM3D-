@@ -25,6 +25,15 @@ def cross_feature_names():
     return list(CROSS_FEATURE_NAMES)
 
 
+# Stage-3 relational node columns: what a node's neighbours look like, aggregated per node.
+REL_FEATURE_NAMES = ['rel_max_iou', 'rel_max_contain_in', 'rel_max_contain_out', 'rel_n_inter_log',
+                     'rel_is_largest', 'rel_join_n_log', 'rel_join_mean', 'rel_join_min']
+
+
+def rel_feature_names():
+    return list(REL_FEATURE_NAMES)
+
+
 def pair_feature_names():
     """Full edge feature layout: the 14 intra-frame features, then the 15 cross-frame ones."""
     return edge_feature_names() + cross_feature_names()
@@ -161,3 +170,49 @@ def pair_features(stats, a, b, inter0, inter1, va, vb, frame_gap, same_frame, ha
     if edge_feat is None:
         edge_feat = torch.zeros((len(cross), len(edge_feature_names())), device=dev)
     return torch.cat([edge_feat, cross], 1)
+
+
+def node_relations(stats, a, b, inter0, size, node_type, join_stats):
+    """(G, 8) per-node "compare me with the objects I intersect" features (stage 3).
+
+    Every node aggregates the edges whose *other* end is an object (``node_type == 2``) and whose
+    voxel sets truly intersect (``inter0 > 0``): the max IoU with such a neighbour, the max
+    containment in both directions, how many there are, and whether the node is the largest of
+    them. The last three columns are the memory's join statistics (``join_stats`` (G, 3): join
+    count, probability sum, probability min with a 1.0 default) - zero for nodes that never
+    absorbed a block.
+
+    ``size`` is the per-node voxel count (``overlap_matrix``'s ``size_a``); emitted columns are
+    log1p(count), mean and min, all zero when nothing joined. Ties count as "largest".
+    """
+    dev = stats.n.device
+    g = stats.n.shape[0]
+    obj = node_type.long() == 2
+    src = torch.cat([a, b])
+    dst = torch.cat([b, a])
+    i0 = torch.cat([inter0, inter0])
+    s_src = torch.cat([size[a], size[b]])
+    s_dst = torch.cat([size[b], size[a]])
+    valid = obj[dst] & (i0 > 0)
+    idx = src[valid]
+    n_inter = torch.bincount(idx, minlength=g).float()
+    iou = i0[valid] / (s_src[valid] + s_dst[valid] - i0[valid]).clamp_min(1)
+    c_in = i0[valid] / s_src[valid].clamp_min(1)
+    c_out = i0[valid] / s_dst[valid].clamp_min(1)
+
+    def amax(v):
+        out = torch.zeros(g, device=dev)
+        if len(idx):
+            out.scatter_reduce_(0, idx, v, 'amax')
+        return out
+
+    max_iou, max_in, max_out = amax(iou), amax(c_in), amax(c_out)
+    max_nb_size = amax(s_dst[valid])
+    is_largest = ((n_inter > 0) & (size >= max_nb_size)).float()
+    jn, jsum, jmin = join_stats[:, 0], join_stats[:, 1], join_stats[:, 2]
+    has_join = jn > 0
+    return torch.stack([
+        max_iou, max_in, max_out, torch.log1p(n_inter), is_largest,
+        torch.log1p(jn), torch.where(has_join, jsum / jn.clamp_min(1), torch.zeros_like(jsum)),
+        torch.where(has_join, jmin, torch.zeros_like(jmin)),
+    ], 1)

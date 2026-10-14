@@ -126,3 +126,17 @@ phase2:
   seeds: [0, 1, 2]
   graphs_root: work_dirs/stream_v2/phase2/graphs
   init_from: work_dirs/merge_net/full/model.pt   # 共享部分从 GroupMergeNet 初始化
+
+# ---- 阶段 3：排序诊断、包含度去重、关系线索与（条件性）物体级自注意力
+# 只在 A 轮数据上训练；所有选择在 60 个留出场景上做，16 个验证场景只跑最终配置一次。
+phase3:
+  out_root: work_dirs/stream_v2/phase3
+  graphs_root: work_dirs/stream_v2/phase3/graphs   # 重新采集的 A 轮图（多出 8 列关系线索）
+  rank_weight: 0.0          # 场景内 pairwise 排序损失权重（0 = 关；relq 实验用 0.5，命令行覆盖）
+  rel: false                # 8 列关系线索（相交物体 IoU/包含度/个数/最大者 + 并入统计）；最终未纳入（F3.5），实验用 --rel 开
+  attn_layers: 0            # 物体级自注意力层数（0 = 关）；未加：第三步留出增益 −0.013 < +0.03（计划 §6.5）
+  dedup_contain: 0.7        # 包含度抑制阈值（null 或 >1 = 关）；最终配置：留出上从 {0.6,0.7,0.8,0.9} 选 0.7
+  touch_dilation: null      # 候选接触判定膨胀格数；null = 沿用 stream_v2.touch_dilation（1）
+  cand_dist: null           # 候选扩展：质心距离上限（米）；null = 关
+  cand_cos: null            # 候选扩展：外观余弦下限；null = 关
+  seeds: [0, 1, 2]

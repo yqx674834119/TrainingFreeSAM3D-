@@ -367,13 +367,68 @@ GT 不纯"（`streaming/unified_probe.py`）。输出 `work_dirs/stream_v2/phase
 - 四个问题的完整回答：`work_dirs/stream_v2/phase2/summary.md`；逐条发现（含证据、口径、出处）：
   `docs/findings.zh-CN.md` 的 F2.1–F2.14。
 
-## 6. 第 3 阶段：在线评估、消融、计时
+## 6. 第 3 阶段：排序诊断、去重与关系线索（2026-10-14）
 
-1. 主结果：`tools/window_eval.py --memory window --score model --checkpoint <tag> --window 5 --segment-smooth`，
-   对比现有默认（AP50 0.365）、ESAM-E（0.589）、第 0 阶段的 oracle 上限。
-2. 消融：窗口 1/3/5；`past_unit` block/fragment；`--no-object-merge`；`raw_cover` 开/关；去掉 `feat_cos`。
-3. 逐帧副产品：用 `update` 返回的本帧标签算逐帧平均最佳 IoU（带历史），与 0.627 / 0.688 / ESAM 0.754 并列报告。
-4. 计时：`tools/merge_benchmark.py` 加 `--memory window`，报逐阶段 ms/帧（建图、打分、分组、编号分配、滑窗）。目标记忆阶段 ≤ 20 ms/帧，未达标如实报告并给出瓶颈。
+> 旧的第 3 阶段计划（在线评估 / 窗口 1-3-5 消融 / `window_eval.py --memory window`）作废：窗口记忆
+> 与统一模型在第 2 阶段已合并成一条在线流程（`unified_flow`），窗口大小不再是变量。第 3 阶段的题目
+> 改为任务书指定的四件事 + 一个条件项：诊断排序头为什么只学到 41%、免费的包含度去重、扩候选（两案）、
+> 关系线索 + 场景内成对排序损失；条件项是物体级自注意力（只有第 3 步留出增益 ≥ +0.03 才加）。
+
+### 6.1 排序诊断（已完成）
+`freesam3d/streaming/phase3_diag.py` + `tools/window_phase3_diag.py`：训练侧（A+B+intra_extra 抽样
+200 个场景、其中 137 个有跨帧节点）与留出侧（60 场景跑到终态）分别统计质量头 vs 最终体素 IoU 的
+Spearman/AUC，并把排在最前的错误答案归类为"重复 / 是更高分正确 mask 的一部分"。结论见 F3.1：
+不是过拟合，是信息不足；顶层错误不是重复。
+
+### 6.2 包含度去重（已完成）
+`freesam3d/streaming/unified_dedup.py`：NMS 之后按分数贪心、丢弃被更高分 mask 包含 ≥0.8 的 mask；
+阈值 {0.6,0.7,0.8,0.9} 只在留出场景上选（`tools/window_phase3_sweep.py --dedup`），验证集不参与。
+结果见 F3.2。
+
+### 6.3 扩候选（已完成，两案均否）
+接触判定膨胀 1→2（`--touch-dilation 2`）；"质心距离 <0.3 m 且外观余弦 > 阈值"作为 block↔object
+候选（`WindowConfig.cand_dist/cand_cos`，在 `unified_flow.assign` 里并入候选集，只作用于
+block↔object 对）。两案在 60 个留出场景上的 AP50/dup_rate 变化见 F3.3：膨胀 2 让 mask 变差
+（oracle 上限同步下降），质心+外观规则与基线逐位相同（新增边极少、且从不改变任何决策）。
+
+### 6.4 关系线索 + 场景内成对排序损失（修正后重做）
+- 节点新增 8 列关系线索（`pair_features.REL_FEATURE_NAMES`：与相交物体的最大 IoU、双向包含度、
+  相交物体数、是否其中最大、join 次数与 join 时分数的均值/最小值），在 `unified_flow.assign` 里
+  与推理同一代码路径计算；A 轮训练图全量重采（1141 场景，覆盖口径见 F3.4）。
+- 训练加场景内成对排序损失（`unified_train.rank_loss`，RankNet，帧内成对、平局跳过）。
+- **第一版**把 rel 拼进共享主干 → 经节点嵌入泄漏进边决策、mask 变差（F3.5，两臂均低于 baseline）。
+  按任务书"只在排序头的节点输入上加线索"的原意改为质量头输入上的加法 `rel_emb`
+  （`UnifiedMergeNet.quality_input`；边路径完全不带 rel，单测断言 rel 变化时边 logits 逐位不变），
+  重训 3 个 seed（relq 臂）后的对比见 F3.5 末尾。复现（每 seed 一个进程；YAML 默认关，命令行显式开）：`for s in 0 1 2; do python tools/window_phase3_train.py --rel --rank-weight 0.5 --seeds $s --out work_dirs/stream_v2/phase3/model/relq_s$s & done; wait`。
+
+### 6.5 物体级自注意力：不加（条件未满足）
+
+任务书条件是"第 3 步把留出 AP 提高 ≥ +0.03 才加"。实测 relq 相对 baseline 是 **−0.013**
+（0.2899 vs 0.3031，per-seed 区间不重叠，F3.5 末尾）→ 条件未满足，不加。旁证：（a）关系线索三种
+接线（主干 / 主干+排序损失 / 仅排序头）全部 ≤ baseline，且 relq 训练侧 Spearman 已是四臂最高
+（0.680）仍未兑现 → 瓶颈不在节点侧信息量与排序头容量；（b）候选掩码空间仍是主约束（留出 oracle
+上限 0.4519 vs quality 0.3069）。注意力通路已实现并冒烟验证（`ObjectAttention`，1 层单头
+dim 64→inner 32，7 392 参数；含修掉的推理期 `frame_id=None` 掩码 bug 与回归单测）；若后续扩了
+候选空间可再启用，按同一留出协议判。
+
+### 6.6 最终配置与 16 场景结果（已完成）
+
+最终配置（全部在留出上选）：**A 轮 seed0**（`phase2/model/A/seed0/model.pt`）@ intra 0.75 /
+block-object 0.60 / object-object 1.01 + **包含度去重 0.7**。16 场景一次运行
+（`tools/window_phase3_final.py`，mesh 协议）：quality 排序 AP50 **0.422（不去重）/ 0.413（去重）**，
+oracle 上界 0.635 / 0.636；去重在验证集上 masks 74.4→60.2、dup_rate 0.240→0.168、frags/GT
+1.21→0.97、平均最佳 IoU 0.578→0.547、AP50 −0.009（与留出 +0.003 方向相反，两者都小）→ 结论：
+**去重是"清 mask"的免费工具，AP 中性**（详见 F3.6）。关系线索（relq −0.013）、扩候选（无正贡献）、
+自注意力（条件未满足）均未纳入。对照第 2 阶段 0.422、ESAM 0.589：oracle 0.636 已超 ESAM，差距
+结构与第 2 阶段一致（排序为主、mask 质量为次）。
+
+### 6.7 耗时（已完成）
+
+阶段 3 模块 **53.6 ms/帧**（16 场景报告：freeze 10.6±3.9 ＋ build 9.9±1.8 ＋ score 15.0±4.4 ＋
+cluster 0.4±0.1 ＋ assign 17.7±5.1，按场景均值±标准差）；隔离基准 54.9 ms
+（`tools/merge_benchmark.py --unified`，50 帧、scene0050_00、114 物体）。第 2 阶段同口径 49.5 ms。
+模型与第 2 阶段相同（41 548 参数）、去重在输出端（≈0 成本）→ 差值为运行波动，阶段 3 没有增加
+推理成本。
 
 ---
 

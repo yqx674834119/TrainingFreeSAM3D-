@@ -43,6 +43,11 @@ class WindowConfig:
     # ``cross_threshold`` when left at None, so a single shared threshold is the default reading.
     bo_threshold: float = None      # unified step 2: block -> object join threshold
     oo_threshold: float = None      # unified step 3: object <-> object merge threshold
+    # stage 3 (unified): candidate expansion - a block <-> object pair counts as a candidate even
+    # without voxel contact when its centroid distance is under ``cand_dist`` and its appearance
+    # cosine is above ``cand_cos`` (both None = off; read by ``UnifiedGrouping.assign``)
+    cand_dist: float = None
+    cand_cos: float = None
 
 
 @dataclass
@@ -360,6 +365,8 @@ class WindowMemory:
                              'votes': torch.empty(0, dtype=torch.int32, device=self.device),
                              'stats': NodeStats.zeros(1, self.feat_dim, self.device), 'votes_gt': {},
                              'quality': float('nan'),      # stage-2 'unified': model's node quality
+                             # stage 3: what joined this object and with which edge score (node input)
+                             'join_n': 0, 'join_sum': 0.0, 'join_min': 1.0,
                              'fz_n': 0, 'fz_imp': 0, 'fz_pos': set()}
         return oid
 
@@ -370,6 +377,8 @@ class WindowMemory:
         ka['vox'], ka['votes'] = _union_votes(ka['vox'], ka['votes'], kb['vox'])
         ka['stats'] = ka['stats'].add(kb['stats'])
         ka['fz_n'] += kb['fz_n']; ka['fz_imp'] += kb['fz_imp']; ka['fz_pos'] |= kb['fz_pos']
+        ka['join_n'] += kb['join_n']; ka['join_sum'] += kb['join_sum']
+        ka['join_min'] = min(ka['join_min'], kb['join_min'])
         for k, c in kb['votes_gt'].items():
             ka['votes_gt'][k] = ka['votes_gt'].get(k, 0) + c
         del self.objects[drop]

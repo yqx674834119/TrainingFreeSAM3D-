@@ -89,14 +89,15 @@ def stack_frames_baseline(frames, mesh_xyz, voxel, top_k_total=200):
 
 
 def mesh_rows(masks_raw, masks_smooth, scores, n_obs, gts, device='cpu', min_points=100,
-              quality=None, iou_gt=None, clean='nms', smoothed=True):
+              quality=None, iou_gt=None, clean='nms', smoothed=True, dedup_contain=None):
     """One mesh-protocol row per ranking mode, for the stage-2 report.
 
     Rows: ``conf`` (the memory's own confidence), ``nobs`` (the stage-1 convention), ``quality`` (the
     stage-2 model's node quality, the ranking stage 2 outputs with) and ``oracle`` (best GT IoU, the
     perfect-ranking ceiling - uses GT, so it is a bound, never a result). Masks are segment-smoothed
     unless ``smoothed=False``, filtered to >= ``min_points`` vertices, and cleaned with NMS unless
-    ``clean='none'``; ``quality`` / ``iou_gt`` must be aligned with the *unfiltered* masks.
+    ``clean='none'``; ``quality`` / ``iou_gt`` must be aligned with the *unfiltered* masks. ``dedup_contain`` (stage 3) adds the containment suppression after
+    the NMS, at that threshold.
     """
     from .postprocess import greedy_nms, rank_scores
     from ..evaluation.instance import association_stats
@@ -117,6 +118,9 @@ def mesh_rows(masks_raw, masks_smooth, scores, n_obs, gts, device='cpu', min_poi
         s = np.asarray(s, np.float32)
         keep = (np.argsort(-s, kind='stable') if clean == 'none'
                 else greedy_nms(masks, s, 0.5, device=device))
+        if dedup_contain is not None:                    # stage 3: drop parts of a kept, better mask
+            from .unified_dedup import dedup_masks
+            keep = keep[dedup_masks(masks[keep], s[keep], dedup_contain, device=device)]
         met = scene_metrics(masks[keep], s[keep], gts, min_points=min_points, device=device)
         st = association_stats(masks[keep], gts, device=device)
         met.update(dup_rate=st['dup_rate'], overmerge=st['overmerge_rate'], frags_gt=st['frags_per_gt'])
