@@ -88,6 +88,42 @@ def stack_frames_baseline(frames, mesh_xyz, voxel, top_k_total=200):
     return masks, scores
 
 
+def mesh_rows(masks_raw, masks_smooth, scores, n_obs, gts, device='cpu', min_points=100,
+              quality=None, iou_gt=None, clean='nms', smoothed=True):
+    """One mesh-protocol row per ranking mode, for the stage-2 report.
+
+    Rows: ``conf`` (the memory's own confidence), ``nobs`` (the stage-1 convention), ``quality`` (the
+    stage-2 model's node quality, the ranking stage 2 outputs with) and ``oracle`` (best GT IoU, the
+    perfect-ranking ceiling - uses GT, so it is a bound, never a result). Masks are segment-smoothed
+    unless ``smoothed=False``, filtered to >= ``min_points`` vertices, and cleaned with NMS unless
+    ``clean='none'``; ``quality`` / ``iou_gt`` must be aligned with the *unfiltered* masks.
+    """
+    from .postprocess import greedy_nms, rank_scores
+    from ..evaluation.instance import association_stats
+    masks = masks_smooth if smoothed else masks_raw
+    base = np.flatnonzero(np.asarray(masks).sum(1) >= min_points)
+    masks = np.asarray(masks)[base]
+    if len(masks) == 0:
+        return {}
+    conf = np.asarray(scores, np.float32)[base]
+    modes = {'conf': conf,
+             'nobs': rank_scores('nobs', masks=masks, conf=conf, n_obs=np.asarray(n_obs)[base])}
+    if quality is not None:
+        modes['quality'] = np.asarray(quality, np.float32)[base]
+    if iou_gt is not None:
+        modes['oracle'] = np.asarray(iou_gt, np.float32)[base]
+    out = {}
+    for name, s in modes.items():
+        s = np.asarray(s, np.float32)
+        keep = (np.argsort(-s, kind='stable') if clean == 'none'
+                else greedy_nms(masks, s, 0.5, device=device))
+        met = scene_metrics(masks[keep], s[keep], gts, min_points=min_points, device=device)
+        st = association_stats(masks[keep], gts, device=device)
+        met.update(dup_rate=st['dup_rate'], overmerge=st['overmerge_rate'], frags_gt=st['frags_per_gt'])
+        out[name] = met
+    return out
+
+
 def frames_from_merge_cache(files, gt='3d'):
     """merge_cache npz files -> FragmentFrames sorted by (scene, frame id).
 

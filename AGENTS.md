@@ -37,6 +37,10 @@ TrainingFreeSAM3D/
 │   │                       #     (window_memory, pair_features, window_scores)、两步式分组(two_step)、
 │   │                       #     ESAM 规则重写(esam_merge)、输出端后处理(postprocess)、
 │   │                       #     混合碎片去向(fragment_fate)、留出场景评估与探针(holdout, window_probe)
+│   │                       #     阶段 2 统一分组(unified_flow：帧内 / block<->object / object<->object
+│   │                       #     三类边共用一个模型 + 节点质量头)、训练图采集(window_data)、
+│   │                       #     统一模型训练(unified_train)、留出阈值扫描(unified_sweep)、
+│   │                       #     未分配 block 归因(unified_probe)
 │   └── vis/                #   所有画图/导出 PLY 的代码
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）

@@ -10,6 +10,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | Query Lifting | `freesam3d/lifting/` | ✅ baseline 完成 |
 | Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
 | 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
+| 统一 MergeNet（帧内 + 跨帧 + 物体合并 + 节点排序，一个模型） | `freesam3d/streaming/unified_flow.py`, `unified_train.py`, `merging/model.py` | ✅ 已完成：16 场景 AP50 0.422（旧管线 0.311、ESAM 0.589），见下与 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) |
 | 提议打分（从 FastSAM mask 层级里选） | `freesam3d/merging/proposals.py`, `scorer.py` | ✅ 见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md) |
 | Query Merging（跨帧，流式 Query Memory） | `freesam3d/streaming/` | ✅ 见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md) |
 | CVPR 投稿规划 | [docs/cvpr_plan.zh-CN.md](docs/cvpr_plan.zh-CN.md) | 📝 方法与实验设计初稿 |
@@ -72,6 +73,28 @@ mesh-segment 平滑：
 记忆每场景约 37 个 query、2.6 万条记录（ESAM 的 `cur_masks` 为 K × 20000 × 帧数 位），update 7.6 ms/帧，
 整条流水线 98.8 ms/帧（`tools/merge_benchmark.py --memory proj`）。差距主要来自逐帧提议质量（GT 提议喂
 同一记忆 0.513）；设计、消融与差距分析见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md)。
+
+## 统一 MergeNet（第 2 阶段，摘要）
+
+一个 41 548 参数的 `UnifiedMergeNet` 取代 GroupMergeNet：帧内边、block↔object 边、object↔object 边共用同一套
+权重与消息传递，另加一个节点质量头（预测节点与它 GT 实例的 IoU）用于输出排序。分组三步：帧内边平均连接成
+block → 每个 block 并入分数最高且过阈值的接触物体 → 接触的物体对按阈值合并；输出按节点质量排序、只做 NMS、
+不丢任何单帧物体。训练数据由第 1 阶段的规则在线跑一遍采集（A 轮），再用 A 轮模型跑一遍（B 轮），两轮合并
+训练；三类边的阈值只在 60 个留出场景上标定。最终配置：A∪B seed0，intra 0.80 / block-object 0.60 /
+object-object 1.01（第 3 步关掉）。16 个验证场景、ESAM 网格协议、segment_smooth 后：
+
+| | 逐帧堆叠（无记忆，旧管线） | 第 1 阶段 | 旧管线 P1 | **第 2 阶段统一模型** | ESAM-E |
+|---|---|---|---|---|---|
+| AP50 | 0.080 | 0.287 | 0.311 | **0.422** | 0.589 |
+| AP25 | 0.265 | — | — | **0.620** | 0.722 |
+| 平均最佳 IoU | 0.402 | — | — | **0.585** | 0.691 |
+| 召回@0.5 | 0.357 | — | — | **0.635** | 0.726 |
+
+**主要缺口在排序，不在合并**：按观测帧数排 AP50 只有 0.271，节点质量头把它抬到 0.422，而完美排序上界 0.634
+已经高于 ESAM 的实际 0.589 —— 掩码集合够用，是排序把分数压下来。退化检查（关掉历史、只用单帧）0.6308 vs
+GroupMergeNet 0.6340（门槛 ≥0.62），即没有丢掉帧内能力。逐帧耗时 49.5 ms（阶段 2 模块），加 FastSAM 约 72 ms
+≈ 120 ms/帧。四个问题的完整回答见 `work_dirs/stream_v2/phase2/summary.md`，逐条发现见
+[docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的 F2.1–F2.14。
 
 ## 模块 1：Query Lifting
 
@@ -176,3 +199,11 @@ GT 的取法和 ESAM 一致：每个点取最近 mesh 顶点的实例，再用�
   投影特征余弦（ESAM：MergeHead 余弦 × bbox IoU），新 query 有入库门槛，维护阶段合并体素 IoU > 0.5
   的 query（ESAM 只截 top-K）。进记忆前的逐帧 NMS 包含阈值 0.8（逐帧评估用 1.01）。评估时同样做
   ESAM 的 mesh-segment 平滑（`streaming/evaluate.py::segment_smooth`）。
+- 阶段 2 的统一模型（`streaming/unified_flow.py`）：用一个 `UnifiedMergeNet` 取代 GroupMergeNet，
+  帧内边、block<->object 边、object<->object 边共用同一套权重与消息传递，另加一个节点质量头
+  （预测节点与它 GT 实例的 IoU，输出端用它排序）。分组三步：帧内边平均连接成 block → 每个 block
+  并入分数最高且过阈值的接触物体 → 接触的物体对按阈值合并。三类边各自一个阈值，只在 60 个留出场景上标定。
+- 与 ESAM 的差别：ESAM 的 MergeHead 只回答"两个 query 是否同物"，没有节点质量回归，也没有"先把本帧
+  碎片粘成 block 再跨帧比较"这一步（block 步骤来自第 1 阶段诊断出的失败模式）；ESAM 输出端会丢弃
+  单帧物体，阶段 2 只做 NMS、不丢任何物体。训练数据由第 1 阶段的规则在线跑一遍采集（`window_data.py`），
+  再用同一个模型跑第二遍（B 轮），两轮数据合并训练。

@@ -29,6 +29,12 @@ def main():
     p.add_argument('--memory', default=None,
                    help='ProjectionHead tag under work_dirs/stream/projection/: attach a QueryMemory and time its update '
                         '(runs --frames consecutive frames of one scene so the memory grows; needs --scorer)')
+    p.add_argument('--unified', default=None,
+                   help='stage-2 checkpoint (.pt): time the unified flow (WindowMemory + UnifiedGrouping) on '
+                        'consecutive frames of one scene instead of the GroupMerger path')
+    p.add_argument('--unified-thresholds', nargs=3, type=float, default=[0.6, 0.3, 0.3],
+                   metavar=('INTRA', 'BO', 'OO'))
+    p.add_argument('--scene', default=None, help='scene for --unified (default: the first val scene)')
     a = p.parse_args()
     cfg = load_config(resolve_path(a.config))
     lc = load_config(resolve_path(cfg['lifting_config']))
@@ -45,6 +51,35 @@ def main():
                                        match_threshold=st.get('match_threshold', 0.3), match_dilation=st.get('match_dilation', 1),
                                        admit_score=st.get('admit_score', 0.3)), device=a.device, projection=proj)
         nms_contain = st.get('nms_contain', nms_contain)      # the memory wants the stricter per-frame NMS
+    if a.unified:                                          # stage 2: one model, per-frame stages of the unified flow
+        import torch
+        from freesam3d.streaming.holdout import load_scene_frames
+        from freesam3d.streaming.unified_flow import make_unified_memory
+        from freesam3d.streaming.unified_train import load_unified_checkpoint
+        model, std, ck = load_unified_checkpoint(resolve_path(a.unified), a.device)
+        cache = resolve_path(cfg['cache_root']) / 'val'
+        scene = a.scene or sorted({f.stem.rsplit('_', 1)[0] for f in cache.glob('*.npz')})[0]
+        frames = load_scene_frames(cache, scene, gt='3d')[:a.frames]
+        thr = [float(t) for t in a.unified_thresholds]
+        mem = make_unified_memory(cfg, model, std, a.device, threshold=thr[0], cross_threshold=thr[1],
+                                  bo_threshold=thr[1], oo_threshold=thr[2])
+        stages = []
+        for fr in frames:
+            mem.update(fr)
+            if str(a.device).startswith('cuda'):
+                torch.cuda.synchronize()
+            stages.append(dict(mem.times))
+        keys = list(stages[0])
+        warm = stages[1:] or stages
+        timing = {k: float(np.mean([s[k] for s in warm])) for k in keys}
+        timing['total'] = float(sum(timing.values()))
+        report = dict(device=a.device, scene=scene, frames=len(stages), thresholds=thr,
+                      params=model.num_params(), timing_ms=timing, objects=len(mem.objects))
+        out = resolve_path('work_dirs/merge_net/benchmark_unified.json')
+        out.write_text(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
+        return
+
     merger = GroupMerger(lc, cfg, resolve_path('work_dirs/merge_net') / a.checkpoint / 'model.pt', a.device, sc,
                          scfg.get('nms_iou', 0.5), nms_contain, scfg.get('top_k'), memory=mem)
     files = list_cache(resolve_path(cfg['cache_root']) / 'val')

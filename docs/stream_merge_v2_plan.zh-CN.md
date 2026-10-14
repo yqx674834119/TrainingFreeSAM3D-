@@ -275,46 +275,97 @@
 
 ---
 
-## 5. 第 2 阶段：统一模型与训练
+## 5. 第 2 阶段：统一模型与训练（已完成，2026-10-14）
 
-### 5.1 模型 `freesam3d/merging/model.py::WindowMergeNet`
+**目标**：用一个 `UnifiedMergeNet` 取代 GroupMergeNet —— 帧内合并、跨帧合并、物体合并、物体排序共用一个
+模型；不新增第二个模型；阈值只在 60 个留出场景上标定，16 个验证场景只做最终汇报。
 
-在 `GroupMergeNet` 基础上：
+### 5.1 模型 `freesam3d/merging/model.py::UnifiedMergeNet`（已实现）
 
-- 节点输入 = `node_geom`(11) + `Linear(C→16)(feat)` + 节点类型 one-hot(3：本帧碎片 / 过去块 / 定稿物体) + `log1p(age)` + `log1p(n_frames)`；
-- 边输入 = `[h_a + h_b, |h_a − h_b|, LayerNorm(pair_features)]`，`D = len(pair_feature_names())`；
-- 一轮消息传递；三个头：边 logit、节点 objectness（thing 物体）、节点 impurity（纯度 < 0.6）。
-- 参数量与 `GroupMergeNet full` 同量级（< 100k）。
+- 节点输入 = `node_geom`(11) + `Linear(640→16)(feat)` + 节点类型 one-hot(3：本帧碎片 / 本帧 block /
+  历史物体) + `log1p(n_frames)` + `log1p(age)`；
+- 边输入 = `[h_a + h_b, |h_a − h_b|, LayerNorm(pair_feat(29))]` + 边类型 one-hot(3：帧内 / block↔object /
+  object↔object)；`pair_feat` = 14 列帧内特征（非帧内边恒为 0）+ 15 列跨帧特征（**每条边都算**）；
+- 一轮消息传递；两个头：边 logit、节点质量（预测该节点与它 GT 实例的 IoU）。
+- 41 548 参数（< 10 万）；共享部分从 `work_dirs/merge_net/full/model.pt` 初始化
+  （`init_from_group_merge_net`，实测复制 18/18 个张量）。`GroupMergeNet` 保留不删。
 
-### 5.2 图数据生成 `freesam3d/streaming/window_data.py`
+### 5.2 分组流程 `freesam3d/streaming/unified_flow.py`（已实现）
 
-对每个训练场景按帧在线跑 `WindowMemory`，每帧保存一张图：节点特征、边、边特征、标签。
+1. 本帧缓存的帧内边过模型 → 平均连接成 **block**（阈值 `threshold`）；
+2. 每个 block 与接触到的物体逐对过模型 → 并入分数最高且 ≥ `bo_threshold` 的物体（多个 block 可并入
+   同一物体）；都没过阈值时，点数 ≥ `admit_min_points` 的 block 开新物体；
+3. 接触的物体对过模型 → ≥ `oo_threshold` 时合并；
+4. 输出按**节点质量**排序，只做 NMS，**不丢弃单帧物体**。
 
-- 边标签：两端纯度均 ≥ 0.6 且多数 GT 相同 → 1；均 ≥ 0.6 且不同 → 0；否则不参与。
-- objectness 标签：纯度 ≥ 0.6 且多数语义不是 wall/floor/ceiling → 1；未标注不作负样本（同 `labels.objectness_labels`）。
-- impurity 标签：纯度 < 0.6 且已标注比例 ≥ 0.3 → 1。
-- **A 轮**：记忆由 oracle 打分驱动；**B 轮**：记忆由 A 轮模型驱动（阈值用 §5.4 标定值）。
-- 存 `work_dirs/stream_v2/graphs/{A,B}/<scene>.pt`。
+`RuleAdapter` 让第 1 阶段的规则（GroupMergeNet 帧内概率 + p2a 包含度 + 物体不互相合并）驱动同一段代码，
+因此 A 轮采集与推理走的是同一条路径（差异口径见 findings F2.2）。
 
-### 5.3 可选特征 `raw_cover`（消融）
+### 5.3 训练图采集 `freesam3d/streaming/window_data.py` + `tools/window_unified_collect.py`（已完成）
 
-对每条边：本帧原始 FastSAM mask 中同时覆盖两端本帧部分各 ≥ 80% 的那些 mask 的最高打分器分数（无则 0；需要 `merge_cache/proposals` 对应帧）。默认关闭，做一次开/关对比。
+- 每个训练场景按帧在线跑上面的流程，每帧存两张图：帧内图（本帧碎片）与跨帧图（block + 历史物体），
+  含节点/边张量与标签，`node_ptr`/`edge_ptr` 按帧分片，外观特征存 fp16。
+- 边标签：两端纯度 ≥ 0.6 且多数 GT 相同 → 1，均 ≥ 0.6 且不同 → 0，否则**掩掉**（不当负类）。
+- 节点标签：历史物体 → 场景结束时对体素 GT 的最佳 IoU（排序目标）；碎片与 block → objectness
+  （`merging.labels.objectness_labels` 的口径）。合并事件用并查集折到最终物体上。
+- A 轮由第 1 阶段的规则驱动（`--round A`）；B 轮由 A 轮模型驱动（`--round B --checkpoint ...`）；
+  另有 `--round intra_extra`：从 `work_dirs/merge_cache/train` 采纯帧内图（无记忆），补充第 1 步的数据。
+- 输出 `work_dirs/stream_v2/phase2/graphs/{A,B,intra_extra}/<scene>.npz`：A 轮 1141 个非留出场景，
+  加 intra_extra 共 2282 个文件 / 35 816 帧。留出场景与 16 个验证场景都不参与训练。
 
-### 5.4 训练与标定 `tools/window_train.py`
+### 5.4 训练 `freesam3d/streaming/unified_train.py` + `tools/window_unified_train.py`（已完成）
 
-- 损失：边 BCE（按边类型重加权，使三类边总权重相等）+ 0.5 × objectness BCE + 0.5 × impurity BCE。
-- 先在 A 轮图上训练，再在 A ∪ B 上继续训练。三个随机种子，记录方差。
-- 阈值：在 60 个留出场景上扫 `threshold ∈ {0.3, …, 0.9}`，指标为**体素级场景 AP50**：
-  `streaming/evaluate.py::voxel_scene_eval`，体素 GT = 跨帧点投票的多数 GT，thing 且 ≥ 20 体素；预测 = 物体体素集合。写入 checkpoint。
-- 物体分数（排序用）= 成员 objectness 的点数加权均值。
-- 输出 `work_dirs/stream_v2/model/<tag>/model.pt`。
+- 损失 = 边 BCE（**三类边各自先取均值再平均**，三类权重相等）+ 节点质量 MSE（sigmoid 输出对目标）。
+- 一个训练步把 32 帧拼成一张不相交图（边是帧内的，只需按帧偏移节点编号）。
+- 三个随机种子（0/1/2），配置见 `configs/merge_net.yaml::phase2`；输出
+  `work_dirs/stream_v2/phase2/model/<round>/seed<k>/model.pt` 与 `train_summary.json`（含逐类边 AUC、
+  节点质量 Spearman 诊断）。
+- 先训 A 轮；B 轮采集后合并 A∪B 继续训练。
 
-### 5.5 退化检查 G1
+### 5.5 阈值标定 `freesam3d/streaming/unified_sweep.py` + `tools/window_unified_sweep.py`（已完成）
 
-`--window 0`（每帧独立、无历史）在验证集逐帧协议（`merging/evaluate.py` 的口径，3D GT）上跑 `WindowMergeNet`：
-平均最佳 IoU 应 ≥ 0.60（`GroupMergeNet full` 为 0.627）。低于 0.60 先查 bug 再继续，并在汇报里说明。
+在 60 个留出场景上扫阈值，指标是体素代理 AP50（`voxel_scene_eval`，与第 1 阶段同口径；任务 0 已验证
+它与网格 AP50 排序一致，Spearman 0.979，见 F2.1）。先三类边共用一个阈值，再各自一个阈值作对照；
+每个三元组跑一遍全部留出场景，结果写 `work_dirs/stream_v2/phase2/sweep/*.json`，`--report` 选最优并写
+`selected.json`。三个种子各跑一遍共享网格用于选种子。
+
+### 5.6 退化检查 G1 `tools/window_unified_degrade.py`（已完成）
+
+关掉历史、只用单帧：统一模型套 `SingleFrameAdapter`（节点类型 0、单次观测、只用帧内边、无记忆）跑
+`merging/evaluate.py` 的逐帧协议（3D GT、thing ≥ 100 点、810 帧）。同一批帧上 GroupMergeNet 的
+mean best IoU 实测 **0.6326**（F2.4），统一模型应 ≥ 0.62。
+
+### 5.7 最终汇报 `tools/window_phase2_final.py`（已完成）
+
+16 个验证场景、ESAM 网格协议、segment_smooth 之后：AP50/AP25/mean best IoU/recall/masks/dup_rate/
+overmerge/frags-per-GT，逐行附完美排序（GT IoU）上界；按"只做跨帧打分 / ＋物体-物体合并 / ＋节点质量排序"
+拆项；并把没有拿到物体的 block 归因成"物体尚未出现 / 存在但不在候选中 / 是候选但分数低 / block 自身
+GT 不纯"（`streaming/unified_probe.py`）。输出 `work_dirs/stream_v2/phase2/final/`。
+
+### 5.8 没做 / 改动
+
+- 原计划的 `raw_cover` 消融特征：暂不做，先看统一模型的收益，必要时再加。
+- 原计划的"节点 impurity 头"改成"节点质量头（预测与 GT 实例的 IoU）"：一个头同时承担 objectness 与
+  排序，少一份标签口径（碎片/block 的 objectness 就是它与 GT 的 IoU 的特例）。
+- A 轮记忆不用 oracle 驱动，改用第 1 阶段的规则（`RuleAdapter`）：oracle 会把 GT 信息带进记忆状态，
+  而第 1 阶段的规则是真实可用的驱动，采到的图更贴近推理分布。
 
 ---
+
+### 5.9 标定结果（2026-10-14）
+
+- **阈值**：三类边在 60 个留出场景上选为 **intra 0.80 / block↔object 0.60 / object↔object 1.01**（第 3 步
+  等于关掉）。分边标定只比一个统一阈值（0.80/0.80/0.80）好 0.0018 AP50，真正决定结果的是 intra 阈值。
+- **物体↔物体合并（第 3 步）在最终工作点上不划算**：留出代理上 bo 0.60 时打开它低 0.0014（bo 0.80 时高
+  0.0087）；16 个验证场景上（A 轮）打开它让 AP50 0.445 → 0.436、mean best IoU 0.577 → 0.547。它的作用是
+  「用掩码精度换检出」，因此最终配置关掉。若以后要重开，应先把 oo 边头的精度做上去（当前它会并错物体）。
+- **两轮自举数据（A∪B）没有在验证集上兑现**：16 场景 AP50 0.422 vs 只 A 轮 0.436（各自用自己留出选出的阈值）；留出代理上 A∪B 略好
+  （0.3099 vs 0.3053），单帧能力也略低（0.6308 vs 0.6338）。差距在种子噪声内 → 下一步优先投排序头与掩码
+  精度，而不是再加一轮数据。
+- **验收**：退化检查通过（单帧 0.6308 vs GroupMergeNet 0.6340，门槛 ≥0.62）；16 场景 AP50 0.422 超过任务
+  目标 0.369；阶段 2 模块 49.5 ms/帧、41 548 参数。
+- 四个问题的完整回答：`work_dirs/stream_v2/phase2/summary.md`；逐条发现（含证据、口径、出处）：
+  `docs/findings.zh-CN.md` 的 F2.1–F2.14。
 
 ## 6. 第 3 阶段：在线评估、消融、计时
 

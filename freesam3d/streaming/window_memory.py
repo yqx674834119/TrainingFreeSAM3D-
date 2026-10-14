@@ -35,9 +35,14 @@ class WindowConfig:
     admit_min_points: int = 100     # all-current group: below this many points no new object is opened
     object_merge: bool = True       # allow two frozen objects to merge inside one group
     purity: float = 0.8             # oracle scoring threshold
-    grouping: str = 'linkage'       # 'linkage' (stage 0/0c) | 'two_step' (stage 1: blocks, then block -> object)
+    grouping: str = 'linkage'       # 'linkage' (stage 0/0c) | 'two_step' (stage 1) | 'unified' (stage 2)
     cross_rule: str = 'p2a'         # two_step step 2: 'p2a' = block containment, 'p2b' = that x clamp(cos,0,1)
     cross_threshold: float = 0.5    # two_step step 2 threshold (step 1 reuses ``threshold``)
+    # 'unified' (stage 2, streaming/unified_flow.py): one model scores the intra-frame edges, the
+    # block <-> object edges and the object <-> object edges. Steps 2/3 fall back to
+    # ``cross_threshold`` when left at None, so a single shared threshold is the default reading.
+    bo_threshold: float = None      # unified step 2: block -> object join threshold
+    oo_threshold: float = None      # unified step 3: object <-> object merge threshold
 
 
 @dataclass
@@ -139,19 +144,21 @@ def _union_votes(old_vox, old_votes, new_vox):
 class WindowMemory:
     """The unified memory. ``update`` consumes one frame and returns its point-level object ids."""
 
-    def __init__(self, cfg=None, score_fn=None, device='cuda'):
+    def __init__(self, cfg=None, score_fn=None, device='cuda', unified=None):
         self.cfg = cfg or WindowConfig()
         self.score_fn = score_fn
         self.device = device
+        self.unified = unified      # UnifiedGrouping for cfg.grouping == 'unified' (stage 2)
         self.feat_dim = 0
         self.reset()
 
     def reset(self):
         self.frame_index = -1
         self.window = []            # [{'pos', 'frame_id', 'frags': [{'idx','obj','vox','stats','votes'}]}] oldest first
-        self.objects = {}           # id -> {'vox', 'votes', 'stats' (1-row NodeStats), 'votes_gt'}
+        self.objects = {}           # id -> {'vox', 'votes', 'stats' (1-row NodeStats), 'votes_gt', 'quality'}
         self.next_obj = 0
         self.last_graph = None
+        self.last_unified = None    # products of the last 'unified' grouping (blocks, edges, quality)
         self.times = {}
 
     # ---------------------------------------------------------------- update
@@ -259,21 +266,35 @@ class WindowMemory:
         sync(); self.times['build_ms'] = (time.perf_counter() - t0) * 1e3
 
         # 5. score + cluster + assign
-        if self.score_fn is None:
-            raise RuntimeError('WindowMemory.update needs a score_fn (stage 0: oracle_scores)')
-        sync(); t0 = time.perf_counter()
-        prob = np.asarray(self.score_fn(graph).detach().cpu(), np.float64).reshape(-1)
-        sync(); self.times['score_ms'] = (time.perf_counter() - t0) * 1e3
-        sync(); t0 = time.perf_counter()
-        cluster = None if cfg.grouping == 'two_step' else \
-            LINKAGE[cfg.linkage](num_nodes, graph.edges, prob, cfg.threshold)
-        sync(); self.times['cluster_ms'] = (time.perf_counter() - t0) * 1e3
+        if cfg.grouping == 'unified':
+            # stage 2: one model scores the intra-frame edges, the block <-> object edges and the
+            # object <-> object edges, and predicts the node quality the output stage ranks by
+            # (streaming/unified_flow.py). It owns its own stages and timing.
+            if self.unified is None:
+                raise RuntimeError("grouping='unified' needs a UnifiedGrouping passed as unified=")
+            sync(); t0 = time.perf_counter()
+            node_n = stats.n.cpu().numpy()
+            assign, info = self.unified.assign(self, graph, node_prev, node_n, num_cur, n_own, n_vox,
+                                               f_vox_list, stats_cur, pos)
+            sync()
+            self.times.update(info['times'])
+            self.last_unified = info
+        else:
+            if self.score_fn is None:
+                raise RuntimeError('WindowMemory.update needs a score_fn (stage 0: oracle_scores)')
+            sync(); t0 = time.perf_counter()
+            prob = np.asarray(self.score_fn(graph).detach().cpu(), np.float64).reshape(-1)
+            sync(); self.times['score_ms'] = (time.perf_counter() - t0) * 1e3
+            sync(); t0 = time.perf_counter()
+            cluster = None if cfg.grouping == 'two_step' else \
+                LINKAGE[cfg.linkage](num_nodes, graph.edges, prob, cfg.threshold)
+            sync(); self.times['cluster_ms'] = (time.perf_counter() - t0) * 1e3
 
-        sync(); t0 = time.perf_counter()
-        node_n = stats.n.cpu().numpy()
-        assign = (self._two_step_assign(graph, prob, node_prev, node_n, num_cur, n_own, n_vox,
-                                        f_vox_list, stats_cur)
-                  if cfg.grouping == 'two_step' else self._assign(cluster, node_kind, node_prev, node_n))
+            sync(); t0 = time.perf_counter()
+            node_n = stats.n.cpu().numpy()
+            assign = (self._two_step_assign(graph, prob, node_prev, node_n, num_cur, n_own, n_vox,
+                                            f_vox_list, stats_cur)
+                      if cfg.grouping == 'two_step' else self._assign(cluster, node_kind, node_prev, node_n))
         for i, p in enumerate(past):                              # revise the window: re-glue past fragments
             obj = int(assign[num_cur + i])
             for wpos, fidx in p['members']:
@@ -338,6 +359,7 @@ class WindowMemory:
         self.objects[oid] = {'vox': torch.empty(0, dtype=torch.int64, device=self.device),
                              'votes': torch.empty(0, dtype=torch.int32, device=self.device),
                              'stats': NodeStats.zeros(1, self.feat_dim, self.device), 'votes_gt': {},
+                             'quality': float('nan'),      # stage-2 'unified': model's node quality
                              'fz_n': 0, 'fz_imp': 0, 'fz_pos': set()}
         return oid
 
@@ -478,8 +500,9 @@ class WindowMemory:
     def object_attrs(self):
         '''Per-object attributes aligned with ``render`` row order (stage 0b post-processing):
         point count, points from impure (< purity) member fragments, distinct observation
-        frames, and the mean FastSAM confidence (the render score).'''
-        ids, n_pts, imp_pts, n_obs, conf = [], [], [], [], []
+        frames, the mean FastSAM confidence (the render score), and - under ``grouping='unified'``
+        - the model's node quality (the stage-2 ranking score; NaN otherwise).'''
+        ids, n_pts, imp_pts, n_obs, conf, quality = [], [], [], [], [], []
         for oid in sorted(self.objects):
             rec = self.objects[oid]
             n, imp = float(rec['fz_n']), float(rec['fz_imp'])
@@ -494,9 +517,10 @@ class WindowMemory:
                     positions.add(e['pos'])
             ids.append(oid); n_pts.append(int(n)); imp_pts.append(int(imp))
             n_obs.append(len(positions)); conf.append(c_sum / max(n_tot, 1.0))
+            quality.append(float(rec.get('quality', float('nan'))))
         return dict(ids=np.asarray(ids, np.int64), n_pts=np.asarray(n_pts, np.int64),
                     imp_pts=np.asarray(imp_pts, np.int64), n_obs=np.asarray(n_obs, np.int64),
-                    conf=np.asarray(conf, np.float32))
+                    conf=np.asarray(conf, np.float32), quality=np.asarray(quality, np.float32))
 
     def stats(self):
         return dict(objects=len(self.objects), window_frames=len(self.window),

@@ -62,15 +62,18 @@ def best_iou(masks, gts, device='cpu'):
     return iou_matrix(np.asarray(masks), gts, device).max(1).astype(np.float32)
 
 
-def rank_scores(mode, masks=None, conf=None, n_obs=None, iou_gt=None):
+def rank_scores(mode, masks=None, conf=None, n_obs=None, iou_gt=None, quality=None):
     """Ranking score per mask.
 
     ``conf`` = FastSAM confidence mean (the current default), ``size`` = vertex count,
     ``nobs`` = distinct observation frames with ties broken by the larger mask (the size
-    term is < 1 by construction), ``oracle`` = best GT IoU (ceiling only, uses GT).
+    term is < 1 by construction), ``quality`` = the stage-2 model's node quality
+    (``WindowMemory.object_attrs()['quality']``), ``oracle`` = best GT IoU (ceiling only, uses GT).
     """
     if mode == 'conf':
         return np.asarray(conf, np.float32)
+    if mode == 'quality':
+        return np.asarray(quality, np.float32)
     if mode == 'size':
         return np.asarray(masks.sum(1), np.float32)
     if mode == 'nobs':

@@ -94,3 +94,112 @@ def build_model(kind, geom_dim, feat_dim, edge_dim, cfg):
         return GroupMergeNet(geom_dim, feat_dim, edge_dim, node_hidden, cfg['feature_proj'],
                              cfg['message_passing'], cfg['dropout'])
     raise KeyError(f'unknown model kind {kind!r}')
+
+
+class UnifiedMergeNet(nn.Module):
+    """One small model for the whole merge task (stage 2): intra-frame edges, block <-> object edges,
+    object <-> object edges, plus a per-node *quality* head (predicted IoU with the GT instance,
+    used as the object ranking score at output time).
+
+    Node input : [node_geom(11), P . feat(C -> feature_proj), node-type one-hot(3),
+                  log1p(n_frames), log1p(age)]
+    Edge input : [h_a + h_b, |h_a - h_b|, LayerNorm(edge_feat), edge-type one-hot(3)]
+                 ``edge_feat`` is the 29-column pair layout: the 14 cached intra-frame columns
+                 (zero off intra-frame edges) followed by the 15 cross-frame columns, which are
+                 computed for *every* edge.
+    One message-passing round; both heads read the same (updated) node embedding.
+
+    Edge direction is canonicalised by node index (a < b), so the asymmetric cross columns
+    (contain_a_in_b vs contain_b_in_a) are well-defined. ``GroupMergeNet`` stays as the
+    per-frame baseline; ``init_from_group_merge_net`` copies what the two share.
+    """
+    NODE_TYPES = 3       # 0 current-frame fragment, 1 current-frame block, 2 history object
+    EDGE_TYPES = 3       # 0 intra-frame, 1 block <-> object, 2 object <-> object
+
+    def __init__(self, geom_dim, feat_dim, edge_dim, hidden=64, feature_proj=16, dropout=0.1):
+        super().__init__()
+        self.proj = nn.Linear(feat_dim, feature_proj)
+        self.node = _mlp(geom_dim + feature_proj + self.NODE_TYPES + 2, hidden, hidden, dropout)
+        self.edge_norm = nn.LayerNorm(edge_dim)
+        self.edge = _mlp(2 * hidden + edge_dim + self.EDGE_TYPES, hidden, hidden, dropout)
+        self.msg = _mlp(hidden, hidden, hidden, dropout)
+        self.head = nn.Linear(hidden, 1)
+        self.quality = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Linear(hidden // 2, 1))
+        self.node_dim = geom_dim + feature_proj + self.NODE_TYPES + 2
+        self.edge_dim = edge_dim
+
+    def node_input(self, geom, feat, node_type, n_frames, age):
+        oh = torch.nn.functional.one_hot(node_type.long(), self.NODE_TYPES).to(geom.dtype)
+        return torch.cat([geom, self.proj(feat), oh,
+                          torch.log1p(n_frames)[:, None], torch.log1p(age)[:, None]], 1)
+
+    def forward(self, geom, feat, edges, edge_feat, node_type, n_frames, age, edge_type):
+        """-> (edge_logit (E,), quality_logit (G,)). An empty ``edges`` gives a node-only call."""
+        h = self.node(self.node_input(geom, feat, node_type, n_frames, age))
+        if len(edges) == 0:
+            return h.new_empty((0,)), self.quality(h).squeeze(1)
+        a, b = edges[:, 0].long(), edges[:, 1].long()
+        et = torch.nn.functional.one_hot(edge_type.long(), self.EDGE_TYPES).to(h.dtype)
+        ef = self.edge_norm(edge_feat)
+        e = self.edge(torch.cat([h[a] + h[b], (h[a] - h[b]).abs(), ef, et], 1))
+        agg = h.new_zeros(h.shape).index_add_(0, a, self.msg(e)).index_add_(0, b, self.msg(e))
+        deg = torch.bincount(torch.cat([a, b]), minlength=len(h)).clamp_min(1).unsqueeze(1)
+        h = h + agg / deg
+        e = self.edge(torch.cat([h[a] + h[b], (h[a] - h[b]).abs(), ef, et], 1))
+        return self.head(e).squeeze(1), self.quality(h).squeeze(1)
+
+    def num_params(self):
+        return sum(p.numel() for p in self.parameters())
+
+
+# ``GroupMergeNet`` -> ``UnifiedMergeNet`` parameter map: the appearance projection, the
+# message-passing MLP and both heads are shared exactly; the first layers grew their input
+# (node 27 -> 32, edge 142 -> 160) and keep the overlapping leading columns.
+_GROUP_TO_UNIFIED = {
+    'proj.weight': 'proj.weight', 'proj.bias': 'proj.bias',
+    'node.0.weight': 'node.0.weight', 'node.0.bias': 'node.0.bias',
+    'node.3.weight': 'node.3.weight', 'node.3.bias': 'node.3.bias',
+    'edge.0.weight': 'edge.0.weight', 'edge.0.bias': 'edge.0.bias',
+    'edge.3.weight': 'edge.3.weight', 'edge.3.bias': 'edge.3.bias',
+    'msg.0.0.weight': 'msg.0.weight', 'msg.0.0.bias': 'msg.0.bias',
+    'msg.0.3.weight': 'msg.3.weight', 'msg.0.3.bias': 'msg.3.bias',
+    'head.weight': 'head.weight', 'head.bias': 'head.bias',
+    'edge_norm.weight': 'edge_norm.weight', 'edge_norm.bias': 'edge_norm.bias',
+}
+# The parameters whose *input* legitimately grew with the unified layout (node: geom+proj then
+# type/n_frames/age; edge: [h_a+h_b, |h_a-h_b|, edge_feat] with 14 of the 29 columns shared;
+# edge_norm: the first 14 columns are the intra-frame features). Only these may be truncated to
+# their overlapping block - a width mismatch anywhere else (a source with a different ``hidden``)
+# is skipped instead of silently copying a meaningless sub-block.
+_TRUNCATABLE = {'node.0.weight', 'edge.0.weight', 'edge_norm.weight', 'edge_norm.bias'}
+
+
+def init_from_group_merge_net(model, state_dict, log=print):
+    """Initialise ``UnifiedMergeNet`` from a trained ``GroupMergeNet`` state dict.
+
+    Copies every mapped parameter whose shape matches exactly, and truncates the parameters listed
+    in ``_TRUNCATABLE`` to their overlapping block (the new columns keep their random init /
+    LayerNorm default). Anything else - e.g. a source trained with a different ``hidden`` width -
+    is skipped and reported. Returns the names of the copied target parameters.
+    """
+    own = model.state_dict()
+    copied, skipped = [], []
+    with torch.no_grad():
+        for src, dst in _GROUP_TO_UNIFIED.items():
+            if src not in state_dict or dst not in own:
+                skipped.append(f'{src} -> {dst} (missing)')
+                continue
+            s, t = state_dict[src], own[dst]
+            if s.shape == t.shape:
+                t.copy_(s)
+            elif (dst in _TRUNCATABLE and s.dim() == t.dim() and s.shape[:-1] == t.shape[:-1]
+                  and all(a <= b for a, b in zip(s.shape, t.shape))):
+                t[tuple(slice(0, int(a)) for a in s.shape)].copy_(s)
+            else:
+                skipped.append(f'{src} -> {dst} ({tuple(s.shape)} -> {tuple(t.shape)})')
+                continue
+            copied.append(dst)
+    if log:
+        log(f'init_from_group_merge_net: copied {len(copied)}/{len(_GROUP_TO_UNIFIED)} tensors'
+            + (f', skipped: {skipped}' if skipped else ''))
+    return copied

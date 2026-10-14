@@ -110,3 +110,19 @@ stream_v2:
      scene0688_00, scene0691_00, scene0691_01, scene0692_00, scene0692_01, scene0692_02,
      scene0692_03, scene0692_04, scene0694_00, scene0694_01, scene0698_00, scene0698_01,
      scene0703_00, scene0703_01, scene0705_00, scene0705_01, scene0705_02, scene0706_00]
+
+# ---- 阶段 2：统一 MergeNet（一个模型负责帧内边 / block<->object 边 / object<->object 边 + 节点质量）
+phase2:
+  hidden: 64
+  feature_proj: 16
+  dropout: 0.1
+  lr: 0.003
+  weight_decay: 0.0001
+  epochs: 12
+  frames_per_step: 32         # 一个训练步里拼成一张不相交图的帧数
+  fit_files: 120              # 拟合标准化统计量时抽样读取的场景数
+  edge_weight: 1.0
+  node_weight: 1.0
+  seeds: [0, 1, 2]
+  graphs_root: work_dirs/stream_v2/phase2/graphs
+  init_from: work_dirs/merge_net/full/model.pt   # 共享部分从 GroupMergeNet 初始化
