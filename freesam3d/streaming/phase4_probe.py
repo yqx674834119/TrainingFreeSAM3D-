@@ -106,15 +106,19 @@ def _cos_logistic(cos, y, scene):
 
 
 def _cross_block(cos, hand, y, scene, hand_names):
-    """One labeled pair set: learned-cosine AUC, 15-col logistic control, learned+contact logistic."""
+    """One labeled pair set: learned-cosine AUC, the 15-col hand control, and the phase-4b
+    complementary rows — the 10 hand *geometry* columns alone, learned+contact, and
+    hand(15) + learned cosine + the 4 contact columns (the "special approval" condition of §五)."""
     out = dict(n=int(len(y)), n_pos=int(np.asarray(y).sum()),
                learned_col=float(column_auc(cos, y)),
                learned_logistic=float(_cos_logistic(cos, y, scene)),
-               hand15_logistic=float(logistic_auc(hand, y, scene)))
+               hand15_logistic=float(logistic_auc(hand, y, scene)),
+               hand_geom10_logistic=float(logistic_auc(np.asarray(hand)[:, :10], y, scene)))
     idx = [hand_names.index(n) for n in ('inter0_frac_min', 'inter1_frac_min',
                                          'contain_a_in_b', 'contain_b_in_a')]
-    out['learned_plus_contact'] = float(logistic_auc(
-        np.c_[np.asarray(cos, np.float64).reshape(-1, 1), hand[:, idx]], y, scene))
+    c = np.asarray(cos, np.float64).reshape(-1, 1)
+    out['learned_plus_contact'] = float(logistic_auc(np.c_[c, hand[:, idx]], y, scene))
+    out['hand15_plus_learned_contact'] = float(logistic_auc(np.c_[hand, c, hand[:, idx]], y, scene))
     return out
 
 

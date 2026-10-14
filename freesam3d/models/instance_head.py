@@ -113,15 +113,23 @@ def fragment_mean_features(point_feat, groups, num_groups):
 
 # ------------------------------------------------------------------ the head
 class InstanceHead(nn.Module):
-    """1x1 per layer -> upsample to the finest stride -> sum -> 3x3 convs -> 32-d unit features."""
+    """1x1 per layer -> upsample to the finest stride -> fuse -> 3x3 convs -> 32-d unit features.
 
-    def __init__(self, in_channels=None, width=64, out_dim=32, conv_layers=3):
+    ``fusion='sum'`` is the phase-4 structure: every layer is projected to the same ``width``
+    channels and added, so six layers share one 64-d tensor. ``fusion='concat'`` (phase-4b fix 0)
+    concatenates the projections (``width * n_layers`` channels) and lets the first 3x3 conv mix
+    them, so a layer's contribution is no longer forced through the same channels as the others.
+    """
+
+    def __init__(self, in_channels=None, width=64, out_dim=32, conv_layers=3, fusion='sum'):
         super().__init__()
         chans = dict(HEAD_INPUTS if in_channels is None else in_channels)
         self.names = tuple(chans)
+        self.fusion = fusion
         self.proj = nn.ModuleDict({k: nn.Conv2d(int(c), width, 1) for k, c in chans.items()})
-        layers = []
-        for _ in range(int(conv_layers) - 1):
+        first = width * len(self.names) if fusion == 'concat' else width
+        layers = [nn.Conv2d(first, width, 3, padding=1), nn.ReLU(inplace=True)]
+        for _ in range(int(conv_layers) - 2):
             layers += [nn.Conv2d(width, width, 3, padding=1), nn.ReLU(inplace=True)]
         layers.append(nn.Conv2d(width, out_dim, 3, padding=1))
         self.body = nn.Sequential(*layers)
@@ -129,13 +137,14 @@ class InstanceHead(nn.Module):
 
     def forward(self, maps):
         size = max((maps[n].shape[-2:] for n in self.names), key=lambda s: s[0] * s[1])
-        acc = None
+        ys = []
         for n in self.names:
             y = self.proj[n](maps[n])
             if y.shape[-2:] != size:
                 y = F.interpolate(y, size=size, mode='bilinear', align_corners=False)
-            acc = y if acc is None else acc + y
-        out = self.body(acc)
+            ys.append(y)
+        fused = torch.cat(ys, 1) if self.fusion == 'concat' else sum(ys)
+        out = self.body(fused)
         return out / out.norm(dim=1, keepdim=True).clamp_min(1e-6)
 
     def num_params(self):
@@ -318,9 +327,35 @@ def load_rgb(image_root, scene, frame_id):
     return cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
 
 
-def sample_points(rng, gt, per_frame):
-    """Up to ``per_frame`` labelled point indices of one frame (uniform over labelled points)."""
-    lab = np.flatnonzero(gt > 0)
+def load_interior_mask(image_root, scene, frame_id, erode_px=2):
+    """Bool (H,W): labelled pixels whose ``erode_px`` neighbourhood holds a single instance id.
+
+    Phase-4b miner fix: the GT instance PNG is eroded so anchors and hard negatives are drawn from
+    instance interiors, not from the 2-3 px band where two touching objects meet and the label of a
+    point is a coin flip. One morphology pair on the label image (``dilate != erode``), no per-instance
+    loop; ``BORDER_REPLICATE`` keeps the image edge from looking like a label boundary.
+    """
+    im = cv2.imread(str(Path(image_root) / scene / 'instance' / f'{frame_id}.png'), cv2.IMREAD_UNCHANGED)
+    if im is None:
+        raise FileNotFoundError(f'{image_root}/{scene}/instance/{frame_id}.png')
+    if im.ndim == 3:
+        im = im[..., 0]
+    k = int(erode_px)
+    if k <= 0:
+        return im > 0
+    ker = np.ones((2 * k + 1, 2 * k + 1), np.uint8)
+    mx = cv2.dilate(im, ker, borderType=cv2.BORDER_REPLICATE)
+    mn = cv2.erode(im, ker, borderType=cv2.BORDER_REPLICATE)
+    return (im > 0) & (mx == mn)
+
+
+def sample_points(rng, gt, per_frame, pool=None):
+    """Up to ``per_frame`` labelled point indices of one frame (uniform over ``pool`` or all labelled).
+
+    ``pool`` (phase-4b miner fix) restricts the draw to instance-interior points, so anchors are not
+    taken from the 2-3 px boundary band where a point's instance label is a coin flip.
+    """
+    lab = np.flatnonzero(gt > 0) if pool is None else np.asarray(pool, np.int64)
     if len(lab) <= per_frame:
         return lab
     return np.sort(rng.choice(lab, size=int(per_frame), replace=False))
@@ -344,10 +379,19 @@ def pick_frames(rng, fids, k, max_gap=3):
 
 # ------------------------------------------------------------------ training
 def train_instance_head(cfg, device='cuda', seed=0, scenes=None, cache_dir=None, image_root=None,
-                        log=print, epochs=None, steps_per_epoch=None, raw=None, in_channels=None):
-    """Train one head with the PartField-style objective. Returns ``(head, log_tau, info)``."""
+                        log=print, epochs=None, steps_per_epoch=None, raw=None, in_channels=None,
+                        recipe=None):
+    """Train one head with the PartField-style objective. Returns ``(head, log_tau, info)``.
+
+    ``recipe`` (phase-4b track A) overrides individual knobs on top of ``phase4.train``:
+    ``fusion`` ('sum' | 'concat'), ``center_loss`` (subtract the frame's point mean before the
+    cosine, the same operation as ``build_feature_cache(center=True)``), and the miner fixes
+    ``erode_px`` / ``hard_frac_max`` / ``hard_warmup_epochs``. ``recipe=None`` reproduces phase 4.
+    """
     p4 = cfg['phase4']
-    tr = p4['train']
+    tr = dict(p4['train'])
+    if recipe:
+        tr.update({k: v for k, v in recipe.items() if v is not None})
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     cache_dir = Path(cache_dir or Path(cfg['cache_root']) / 'seq' / 'train')
@@ -365,7 +409,8 @@ def train_instance_head(cfg, device='cuda', seed=0, scenes=None, cache_dir=None,
 
     head = InstanceHead(in_channels=in_channels, width=int(p4['head']['width']),
                         out_dim=int(p4['head']['out_dim']),
-                        conv_layers=int(p4['head']['conv_layers'])).to(device)
+                        conv_layers=int(p4['head']['conv_layers']),
+                        fusion=str(tr.get('fusion', 'sum'))).to(device)
     log_tau = nn.Parameter(torch.tensor(float(np.log(tr['tau_init'])), device=device)) \
         if tr.get('learn_tau', True) else None
     params = list(head.parameters()) + ([log_tau] if log_tau is not None else [])
@@ -392,26 +437,49 @@ def train_instance_head(cfg, device='cuda', seed=0, scenes=None, cache_dir=None,
             dense = [head(m) for m, _ in encs]
 
             feats, ids, frag_feats, frag_ids = [], [], [], []
+            ppf = int(tr['points_per_frame'])
+            mine = epoch >= int(tr.get('hard_warmup_epochs', 0))     # miner fix: easy first
+            cap = min(int(tr.get('mined_cap', 1024)),
+                      int(round(float(tr.get('hard_frac_max', 1.0)) * ppf)))   # hard share <= 50%
             for fi, (fr, (_, geom), dm) in enumerate(zip(frames, encs, dense)):
-                sel = sample_points(rng, fr.gt, int(tr['points_per_frame']))
+                lab = np.flatnonzero(fr.gt > 0)
+                if int(tr.get('erode_px', 0)) > 0:                  # miner fix: interior only
+                    inner = load_interior_mask(image_root, fr.scene, fr.frame_id, int(tr['erode_px']))
+                    lab = lab[inner[fr.pixels[lab, 1], fr.pixels[lab, 0]]]
+                sel = sample_points(rng, fr.gt, ppf, pool=lab)
                 if len(sel) == 0:
                     continue
                 pf = sample_features(dm, fr.pixels[sel], geom)
-                lab = np.flatnonzero(fr.gt > 0)
                 pool_pix = fr.pixels[lab]
+                mu = None
                 with torch.no_grad():
                     pool_feat = sample_features(dm.detach(), pool_pix, geom)
-                    a_xyz = torch.as_tensor(fr.xyz[sel], device=device)
-                    p_xyz = torch.as_tensor(fr.xyz[lab], device=device)
-                    a_ids = torch.as_tensor(fr.gt[sel], device=device)
-                    p_ids = torch.as_tensor(fr.gt[lab], device=device)
-                    h3 = nearest_different_instance(a_xyz, a_ids, p_xyz, p_ids,
-                                                    tr['hard_3d_dist'], tr['hard_neg_k'])
-                    hf = most_similar_different_instance(pf.detach(), a_ids, pool_feat, p_ids,
-                                                         tr['hard_neg_k'])
-                    mined = _collect_mined(torch.cat([h3, hf], 1), int(tr.get('mined_cap', 1024)))
+                    if tr.get('center_loss'):
+                        # fix 1: same operation as build_feature_cache(center=True) -- subtract the
+                        # frame's point mean (over all 20k points) before the cosine
+                        mu = sample_features(dm.detach(), fr.pixels, geom).mean(0, keepdim=True)
+                        pool_feat = pool_feat - mu
+                        pool_feat = pool_feat / pool_feat.norm(dim=1, keepdim=True).clamp_min(1e-6)
+                    if mine:
+                        a_xyz = torch.as_tensor(fr.xyz[sel], device=device)
+                        p_xyz = torch.as_tensor(fr.xyz[lab], device=device)
+                        a_ids = torch.as_tensor(fr.gt[sel], device=device)
+                        p_ids = torch.as_tensor(fr.gt[lab], device=device)
+                        h3 = nearest_different_instance(a_xyz, a_ids, p_xyz, p_ids,
+                                                        tr['hard_3d_dist'], tr['hard_neg_k'])
+                        hf = most_similar_different_instance(pf.detach(), a_ids, pool_feat, p_ids,
+                                                             tr['hard_neg_k'])
+                        mined = _collect_mined(torch.cat([h3, hf], 1), cap)
+                    else:
+                        mined = np.zeros(0, np.int64)
+                if mu is not None:                       # centre the grad-carrying anchors outside no_grad
+                    pf = pf - mu
+                    pf = pf / pf.norm(dim=1, keepdim=True).clamp_min(1e-6)
                 if len(mined):
                     extra = sample_features(dm, pool_pix[mined], geom)
+                    if mu is not None:
+                        extra = extra - mu
+                        extra = extra / extra.norm(dim=1, keepdim=True).clamp_min(1e-6)
                     pf = torch.cat([pf, extra], 0)
                     sel = np.concatenate([sel, lab[mined]])
                 feats.append(pf)
@@ -460,6 +528,7 @@ def save_head(path, head, log_tau=None, extra=None):
     torch.save(dict(state_dict=head.state_dict(), out_dim=head.out_dim,
                     width=head.proj[head.names[0]].out_channels,
                     conv_layers=len([m for m in head.body if isinstance(m, nn.Conv2d)]),
+                    fusion=head.fusion,
                     in_channels={n: head.proj[n].in_channels for n in head.names},
                     log_tau=None if log_tau is None else float(log_tau.detach()),
                     **(extra or {})), path)
@@ -469,22 +538,27 @@ def load_head(path, device='cpu'):
     """Rebuild an ``InstanceHead`` from a checkpoint (architecture stored alongside the weights)."""
     ck = torch.load(path, map_location=device, weights_only=False)
     head = InstanceHead(in_channels=ck.get('in_channels'), width=int(ck['width']),
-                        out_dim=int(ck['out_dim']), conv_layers=int(ck['conv_layers'])).to(device)
+                        out_dim=int(ck['out_dim']), conv_layers=int(ck['conv_layers']),
+                        fusion=ck.get('fusion', 'sum')).to(device)
     head.load_state_dict(ck['state_dict'])
     head.eval()
     return head, ck
 
 
-def build_feature_cache(head, encoder, files, image_root, out_dir, log=print, overwrite=False,
-                        limit=0, device='cuda', center=False):
-    """Per-frame fragment instance features -> ``<out_dir>/<scene>_<fid>.npz {feat (G,32) fp16}``.
+def _frag_feats(dense, geom, pixels, groups, num, center):
+    """Fragment features of one dense map: per-point sample -> (optional) center+L2 -> fragment mean."""
+    pf = sample_features(dense, pixels, geom)
+    if center:   # F1.1: FastSAM-derived features carry a large per-frame common component
+        pf = pf - pf.mean(0, keepdim=True)
+        pf = pf / pf.norm(dim=1, keepdim=True).clamp_min(1e-6)
+    return fragment_mean_features(pf, groups, num)
 
-    Reuses the cache's pixels/groups exactly, so the fragment partition is untouched. Resumable.
-    """
+
+def _build_cache(files, image_root, out_dir, encoder, dense_fn, log, overwrite, limit, center):
+    """Shared loop of the two fragment-feature builders (trained head / raw frozen layer)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(files)[:limit or None]
-    head.eval()
     done = skipped = 0
     t0 = time.perf_counter()
     for f in files:
@@ -498,12 +572,7 @@ def build_feature_cache(head, encoder, files, image_root, out_dir, log=print, ov
         rgb = load_rgb(image_root, scene, fid)
         maps, geom = encoder.encode(rgb)
         with torch.inference_mode():
-            dense = head(maps)
-            pf = sample_features(dense, pixels, geom)
-            if center:   # F1.1: FastSAM-derived features carry a large per-frame common component
-                pf = pf - pf.mean(0, keepdim=True)
-                pf = pf / pf.norm(dim=1, keepdim=True).clamp_min(1e-6)
-            frag = fragment_mean_features(pf, groups, num)
+            frag = _frag_feats(dense_fn(maps), geom, pixels, groups, num, center)
         np.savez_compressed(dst, feat=frag.half().cpu().numpy())
         done += 1
         if done % 500 == 0 or done == len(files):
@@ -514,6 +583,29 @@ def build_feature_cache(head, encoder, files, image_root, out_dir, log=print, ov
     log(f'feature cache: {done} built, {skipped} skipped, {stats["seconds"] / 60:.1f} min, '
         f'{stats["disk_bytes"] / 2**20:.1f} MiB')
     return stats
+
+
+def build_feature_cache(head, encoder, files, image_root, out_dir, log=print, overwrite=False,
+                        limit=0, device='cuda', center=False):
+    """Per-frame fragment instance features -> ``<out_dir>/<scene>_<fid>.npz {feat (G,32) fp16}``.
+
+    Reuses the cache's pixels/groups exactly, so the fragment partition is untouched. Resumable.
+    """
+    head.eval()
+    return _build_cache(files, image_root, out_dir, encoder, lambda maps: head(maps), log,
+                        overwrite, limit, center)
+
+
+def build_raw_layer_cache(encoder, layer, files, image_root, out_dir, log=print, overwrite=False,
+                          limit=0, center=True):
+    """P2D.0: fragment features of one *raw* frozen map (no head) -> the same npz format as the cache.
+
+    Per-point feature = the layer's bilinear sample, frame-mean-subtracted and L2-normalised (the
+    identical 口径 the trained head's cache uses), then averaged per fragment. This is the
+    appearance-information ceiling the trained head is measured against (phase-4b P2D.0).
+    """
+    return _build_cache(files, image_root, out_dir, encoder, lambda maps: maps[layer], log,
+                        overwrite, limit, center)
 
 
 def load_feature_cache(path):

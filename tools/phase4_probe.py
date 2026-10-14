@@ -39,12 +39,14 @@ def write_summary(out, rep):
          f"{rep['intra']['groupmerge_prob_logistic']:.4f} |",
          '', f"帧内边 {rep['intra']['n']} 条（正 {rep['intra']['n_pos']}）。", '',
          '## (b)(c)(d) 跨帧配对', '',
-         '| 配对集合 | 边数 | 学到余弦（列 / 逻辑回归） | 15 列手工逻辑回归 | 学到+接触量 |', '|---|---|---|---|---|']
+         '| 配对集合 | 边数 | 学到余弦（列 / 逻辑回归） | 15 列手工 | 手工几何 10 列 | 学到+接触量 | 手工15+学到+接触 |',
+         '|---|---|---|---|---|---|---|']
     for key, label in (('cross', '全部跨帧边'), ('hardest_reobserve_vs_adjacent', '再观测 vs 相邻（最难）'),
                        ('touching_negative', '接触的负样本')):
         q = rep[key]
         L.append(f"| {label} | {q['n']} | {q['learned_col']:.4f} / {q['learned_logistic']:.4f} | "
-                 f"{q['hand15_logistic']:.4f} | {q['learned_plus_contact']:.4f} |")
+                 f"{q['hand15_logistic']:.4f} | {q['hand_geom10_logistic']:.4f} | "
+                 f"{q['learned_plus_contact']:.4f} | {q['hand15_plus_learned_contact']:.4f} |")
     L += ['', '## 跨帧间隔 1/2/3', '', '| 间隔（帧） | 边数 | 学到余弦列 AUC | 学到逻辑回归 | 15 列手工 |',
           '|---|---|---|---|---|']
     for k, q in rep.get('by_gap', {}).items():
@@ -60,7 +62,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--config', default='configs/merge_net.yaml')
-    p.add_argument('--head', required=True)
+    p.add_argument('--head', default=None, help='可选：只用于 --tag 默认值（原始层 / 描述子探针不给 head）')
     p.add_argument('--feats', default=None, help='碎片特征缓存目录；默认 <phase4.feat_cache>/holdout')
     p.add_argument('--mode', default=None, choices=['linkage', 'calib', 'two_step'])
     p.add_argument('--rule', default='p2a', choices=['p2a', 'p2b'])
@@ -85,7 +87,7 @@ def main():
             raise SystemExit(f'{sel} missing: run the holdout sweep first, or pass --mode')
         d = json.loads(sel.read_text())['variant']
         variant = Variant(d['mode'], d['rule'], d['intra_threshold'], d['cross_threshold'])
-    tag = a.tag or Path(a.head).parent.name
+    tag = a.tag or (Path(a.head).parent.name if a.head else 'probe')
     out = Path(a.out) if a.out else resolve_path(cfg['phase4']['out_root']) / 'probe' / tag
     out.mkdir(parents=True, exist_ok=True)
     scenes = a.scenes if a.scenes else list(cfg['stream_v2']['holdout_scenes'])

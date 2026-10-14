@@ -453,6 +453,31 @@ cluster 0.4±0.1 ＋ assign 17.7±5.1，按场景均值±标准差）；隔离�
   `freesam3d/vis/phase4.py`、`tools/phase4_{train_head,build_feats,probe,ablate_layers,timing}.py`、
   `tests/test_instance_head.py`（20 个 CPU 测试）；结果在 `work_dirs/stream_v2/phase4/`；发现 F4.1–F4.7。
 
+## 7c. 阶段 4b：2D 头配方修复（轨道 A）+ 3D 几何头判定（轨道 B）（2026-10-14，已完成；无门槛通过，未接入）
+
+- **协议**：与阶段 4 完全相同的探针（window=1、`two_step`/`p2a`/跨帧 0.2、纯度 ≥0.6、60 个留出场景；
+  边数逐位一致：跨帧 141 745、帧内 112 767、最难 134 844）。先做两个不训练的判定探针（P2D.0 原始层、
+  P3D.0 几何描述子），再按判定决定后续范围；所有选择只在留出场景上做。
+- **§一 判定**：P2D.0 最好原始层 backbone 碎片级 0.7208 ∈ [0.70, 0.78] → 轨道 A 只做第 0/1/3 条低成本
+  修复；P3D.0 逐碎片几何描述子 0.6112 ≤ 0.70 → **不做碎片级 3D 头**（轨道 B 只剩物体级重编码或放弃）。
+- **§二 轨道 A**：四点阶梯 none（阶段 4 配方）/ +0（concat）/ +0+1（concat + 中心化进损失）/
+  +0+3（concat + 挖掘修复）/ +0+1+3（全部），各 1 个种子，逐点诊断与探针都跑。**结论：四点阶梯都没过
+  §四 的 A 门槛**（要求最难配对 ≥ max(最好原始层 − 0.03, 手工 15 列 − 0.02) = 0.7723），而该门槛高于
+  外观信息上限 0.7208 本身——与已弃用的 0.85 门槛同属标定错误（门槛定在信息上限之上）。
+- **§三 轨道 B**：按 P3D.0 判定不做碎片级 3D 头；`freesam3d/models/instance_head3d.py` 只保留逐点几何
+  （体素桶邻域、逐点 PCA 法线、局部线状/面状/散射度）与逐碎片 16 维描述子，供 P3D.0 与后续物体级
+  重编码复用。缓存无位姿 → 法线一律用不依赖符号的形式。
+- **§四 / §五**：A 未过；B/B2 未做（其门槛按 P3D.0 已不可达：碎片级几何 + 4 列接触量 0.6965 < 手工
+  几何 10 列 0.7510）；C（融合）未做 → **§五 的条件性接入未触发，没有跑任何一臂，也没有特批**
+  （特批条件要求「手工 15 列 + 学到余弦 + 接触量」≥ 手工 15 列 + 0.01，实测最大 +0.0072）。
+- **§六**：最终配置未变 → **16 个验证场景未重跑**（仍为第 3 阶段的 AP50 0.422 / oracle 0.635 /
+  ESAM 0.589）；`merge_cache/val` 未被覆盖或重建。
+- **产物**：`freesam3d/models/instance_head3d.py`、`freesam3d/models/instance_head.py`（`fusion='concat'`、
+  `build_raw_layer_cache`、`load_interior_mask`、训练配方开关）、`freesam3d/streaming/phase4_probe.py`
+  （两行互补逻辑回归）、`tools/phase4b_{train_head,point_diag}.py`、`tools/phase4_build_feats.py`
+  （`--layer` / `--descriptor` / `--no-center`）；结果在 `work_dirs/stream_v2/phase4b/`；发现 F4b.1–F4b.7；
+  `pytest -q tests` 184 个 CPU 测试全绿。
+
 ## 8. 汇报节点汇总
 
 | 节点 | 时机 | 内容 | 是否等待用户 |

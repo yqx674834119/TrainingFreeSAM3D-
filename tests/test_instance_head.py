@@ -6,8 +6,8 @@ import torch
 from freesam3d.models.instance_head import (
     HEAD_INPUTS, HEAD_NAMES, CachedFrame, InstanceHead, SampleGeom, _as_tensor, _collect_mined,
     encode_image, fragment_mean_features, fragment_pool, load_cached_frame, load_head,
-    most_similar_different_instance, multi_positive_infonce, nearest_different_instance,
-    pick_frames, sample_features, sample_points, save_head,
+    load_interior_mask, most_similar_different_instance, multi_positive_infonce,
+    nearest_different_instance, pick_frames, sample_features, sample_points, save_head,
 )
 
 
@@ -191,3 +191,67 @@ def test_save_load_head_roundtrip_ablated(tmp_path):
     assert list(back.names) == list(chans) and ck['in_channels'] == chans
     maps = {n: torch.randn(1, c, 8, 8) for n, c in chans.items()}
     assert torch.allclose(head(maps), back(maps), atol=1e-6)
+
+
+def test_instance_head_concat_fusion_shape_norm_and_params():
+    maps = {n: torch.randn(1, c, 8, 8) for n, c in HEAD_INPUTS}
+    h = InstanceHead(width=16, out_dim=8, conv_layers=3, fusion='concat')
+    out = h(maps)
+    assert out.shape == (1, 8, 8, 8)
+    assert torch.allclose(out.norm(dim=1), torch.ones(1, 8, 8), atol=1e-5)
+    assert h.num_params() < 1_000_000
+    h_sum = InstanceHead(width=16, out_dim=8, conv_layers=3, fusion='sum')
+    assert h.num_params() > h_sum.num_params()          # concat's first conv sees width * n_layers
+    assert not torch.allclose(h(maps), h_sum(maps))     # the two structures are genuinely different
+
+
+def test_save_load_head_roundtrip_concat(tmp_path):
+    head = InstanceHead(width=16, out_dim=8, conv_layers=3, fusion='concat')
+    save_head(tmp_path / 'head.pt', head)
+    back, ck = load_head(tmp_path / 'head.pt')
+    assert ck['fusion'] == 'concat' and back.fusion == 'concat'
+    maps = {n: torch.randn(1, c, 8, 8) for n, c in HEAD_INPUTS}
+    assert torch.allclose(head(maps), back(maps), atol=1e-6)
+
+
+def test_save_head_defaults_to_sum_fusion(tmp_path):
+    save_head(tmp_path / 'head.pt', InstanceHead(width=8, out_dim=4, conv_layers=2))
+    _, ck = load_head(tmp_path / 'head.pt')
+    assert ck['fusion'] == 'sum'                        # phase-4 checkpoints stay loadable
+
+
+def test_load_interior_mask_excludes_the_boundary_band(tmp_path):
+    import cv2
+    inst = np.zeros((20, 20), np.uint8)
+    inst[5:15, 5:15] = 1
+    inst[5:15, 15:20] = 2
+    d = tmp_path / 's' / 'instance'
+    d.mkdir(parents=True)
+    cv2.imwrite(str(d / '0.png'), inst)
+    inner = load_interior_mask(str(tmp_path), 's', 0, erode_px=2)
+    assert inner.shape == (20, 20) and inner.dtype == bool
+    # erode_px=2 -> a 5x5 kernel (radius 2), so the excluded band is the 2 px next to the boundary
+    assert inner[10, 10]                                # deep inside instance 1
+    assert inner[10, 12]                                # 3 px from the 1|2 boundary -> still interior
+    assert not inner[10, 13]                            # 2 px from it -> excluded
+    assert not inner[10, 14]
+    assert not inner[10, 16]                            # instance 2, boundary side
+    assert not inner[0, 0]                              # unlabelled
+
+
+def test_load_interior_mask_zero_erode_is_just_labelled(tmp_path):
+    import cv2
+    inst = np.zeros((10, 10), np.uint8)
+    inst[2:8, 2:8] = 3
+    d = tmp_path / 's' / 'instance'
+    d.mkdir(parents=True)
+    cv2.imwrite(str(d / '7.png'), inst)
+    inner = load_interior_mask(str(tmp_path), 's', 7, erode_px=0)
+    assert inner[3, 3] and not inner[0, 0]
+
+
+def test_sample_points_honours_an_explicit_pool():
+    gt = np.array([0, 1, 1, 2, 0, 2])
+    pool = np.array([3, 5])                             # only instance 2's points are eligible
+    sel = sample_points(np.random.default_rng(0), gt, 2, pool=pool)
+    assert sorted(sel.tolist()) == [3, 5] and (gt[sel] == 2).all()

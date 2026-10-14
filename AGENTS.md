@@ -1,7 +1,8 @@
 # TrainingFreeSAM3D — 项目约定（所有 agent / 协作者必须遵守）
 
-本项目是 ESAM（训练版）的 **training-free 平行实现**：只使用冻结的 FastSAM-x，
-不训练任何 3D 网络。每个模块都对标 ESAM 中的一个流程模块，先做 baseline，再迭代。
+本项目是 ESAM（训练版）的 **training-free 平行实现**：只使用冻结的 FastSAM-x 作图像模型；
+不训练 3D 骨干网络，只训练 <1M 参数的小头（2D 实例头 / 3D 几何头 / 图合并模型）。
+每个模块都对标 ESAM 中的一个流程模块，先做 baseline，再迭代。
 
 `agents.md` 是指向本文件的软链接，只维护 `AGENTS.md` 一份。
 
@@ -16,7 +17,8 @@ TrainingFreeSAM3D/
 ├── freesam3d/              # 唯一的库代码包，按“职责”分子包
 │   ├── config.py           #   读取 YAML + 命令行覆盖
 │   ├── io/                 #   数据读写：RGB-D 帧、ScanNet GT（不做算法）
-│   ├── models/             #   冻结模型封装：FastSAM 分割 + 特征 hook；实例特征头(instance_head)
+│   ├── models/             #   冻结模型封装：FastSAM 分割 + 特征 hook；实例特征头
+│   │                       #     (instance_head = 2D 头, instance_head3d = 3D 几何头 + 描述子)
 │   ├── lifting/            #   ESAM「Query Lifting」对标模块
 │   │   ├── geometry.py     #     深度反投影、世界坐标、20k 采样
 │   │   ├── grouping.py     #     重叠 mask → 互斥分组、未覆盖点补组

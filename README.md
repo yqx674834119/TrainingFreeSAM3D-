@@ -1,6 +1,6 @@
 # TrainingFreeSAM3D
 
-ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x**，不训练任何 3D 网络。
+ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x** 作图像模型；不训练 3D 骨干网络，只训练 <1M 参数的小头（2D 实例头 / 3D 几何头 / 图合并模型）。
 项目文件组织规则见 [AGENTS.md](AGENTS.md)。
 
 ## 进度
@@ -11,7 +11,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
 | 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
 | 统一 MergeNet（帧内 + 跨帧 + 物体合并 + 节点排序，一个模型） | `freesam3d/streaming/unified_flow.py`, `unified_train.py`, `merging/model.py` | ✅ 已完成：16 场景 AP50 0.422（旧管线 0.311、ESAM 0.589）；第 3 阶段（排序诊断 + 包含度去重）同水平——masks 74→60、dup_rate 0.24→0.17、AP 中性，见下与 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) |
-| 2D 实例特征头（第 4 阶段：冻结 FastSAM 多层特征 + PartField 式对比学习） | `freesam3d/models/instance_head.py` | ❌ 探针未过门槛（按规则未接入）：最难配对 0.672 vs 要求 0.85、手工 0.792，见下 |
+| 2D 实例特征头（第 4 阶段：冻结 FastSAM 多层特征 + PartField 式对比学习） | `freesam3d/models/instance_head.py` | ❌ 探针未过门槛（按规则未接入）：最难配对 0.672（手工 0.792）；第 4b 阶段修配方后仍只有 0.653，而外观信息上限本身只有 0.721——原 0.85 门槛属标定错误，见下 |
 | 提议打分（从 FastSAM mask 层级里选） | `freesam3d/merging/proposals.py`, `scorer.py` | ✅ 见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md) |
 | Query Merging（跨帧，流式 Query Memory） | `freesam3d/streaming/` | ✅ 见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md) |
 | CVPR 投稿规划 | [docs/cvpr_plan.zh-CN.md](docs/cvpr_plan.zh-CN.md) | 📝 方法与实验设计初稿 |
@@ -123,11 +123,35 @@ dup_rate 0.240→0.168、frags/GT 1.21→0.97，AP50 0.422→0.413（留出 +0.0
 | 学到 0.672±0.003 | 0.719±0.003 | 0.673±0.004 |
 | 手工 15 列 0.792 | GroupMergeNet 0.869 | 手工 15 列 0.820 |
 
-门槛（最难 ≥0.85 且帧内 ≥GroupMergeNet）3/3 种子未过，按任务书「过门槛才接入」停止：第 5 步三臂
+门槛（最难 ≥0.85 且帧内 ≥GroupMergeNet；**该 0.85 在第 4b 阶段被判定为标定错误——它高于外观信息上限本身**）3/3 种子未过，按任务书「过门槛才接入」停止：第 5 步三臂
 对比与验证集重跑未做，统一流程最终配置与第 3 阶段相同。逐层消融（去掉任何一层都不变好，neck_p4
 贡献最大、neck_p3≈0）与瓶颈判断（训练配方为主因：头弱于它自己的输入；纯外观路线有真实上限：补上
 接触量也只有 0.736 < 0.792）见 `work_dirs/stream_v2/phase4/summary.md` 与
 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的「阶段 4」（F4.1–F4.7）。
+
+## 实例特征头 · 第 4b 阶段（配方修复 + 几何判定，仍未接入）
+
+第 4 阶段门槛未过后，第 4b 阶段先做两个**不训练**的判定探针，再按判定决定范围（协议与第 4 阶段
+逐位一致：60 个留出场景，跨帧 141 745 / 帧内 112 767 / 最难 134 844 条边）：
+
+- **P2D.0（外观信息上限）**：六层冻结特征各建一份碎片级缓存跑同一个探针，最难配对最好是
+  **backbone 0.7208**（其余 0.660–0.706）；同一批层在**逐点**上最好是 proto 0.8396（backbone 0.7707）
+  ——碎片级与点级的最优层不是同一层。判定：落在 0.70–0.78 → 轨道 A 只做低成本修复。
+  **关键旁证：外观上限 0.7208 本身就低于 §四 门槛 0.7723（= 手工 15 列 − 0.02），所以该门槛与 0.85
+  同属标定错误（定在信息上限之上）。**
+- **P3D.0（几何信息上限）**：逐碎片 16 维几何描述子（bbox/尺寸/PCA 线状-面状-散射/离地高度/法线
+  一致性/点密度）最难配对只有 **0.6112**（≤0.70）。结构性原因：单碎片描述子只能表达「形状像不像」，
+  表达不了「重叠/包含多少」，而后者才是手工几何列里唯一有信号的部分（成对量）→ **不做碎片级 3D 头**。
+- **轨道 A 五点配方阶梯**（各 1 个种子）：逐点层面三条修复都有效（0.6836 → 0.7150，+0.031），但碎片级
+  探针**没有兑现**（0.6717 → 0.6531），回退来自修复 1 与 3 的**组合**（各自单独接近中性）→
+  **A 门槛未过，且按现状不可达**。另测：推理端中心化必需（去掉掉 0.09–0.10）。
+- **B/B2 未做、C 未做 → §五 条件性接入未触发，没有跑任何一臂**；特批条件（手工 15 列 + 学到余弦 +
+  接触量 ≥ 手工 15 列 + 0.01）实测最大 +0.0072，不满足。
+- **16 个验证场景未重跑**（最终配置未变，仍为 AP50 0.422 / oracle 0.635 / ESAM 0.589）；
+  `merge_cache/val` 未被改动。每帧 12.77 ms（读图 1.28 + FastSAM 前向 10.14 + 2D 头 0.51 + 采样池化 0.85）。
+
+完整回答见 `work_dirs/stream_v2/phase4b/summary.md`，逐条发现见
+[docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的「阶段 4b」（F4b.1–F4b.7）。
 
 ## 模块 1：Query Lifting
 
@@ -236,6 +260,10 @@ GT 的取法和 ESAM 一致：每个点取最近 mesh 顶点的实例，再用�
   帧内边、block<->object 边、object<->object 边共用同一套权重与消息传递，另加一个节点质量头
   （预测节点与它 GT 实例的 IoU，输出端用它排序）。分组三步：帧内边平均连接成 block → 每个 block
   并入分数最高且过阈值的接触物体 → 接触的物体对按阈值合并。三类边各自一个阈值，只在 60 个留出场景上标定。
+- 阶段 4b 的 3D 几何头（`models/instance_head3d.py`）：对标 ESAM 的 3D U-Net（ESAM 用它把逐点
+  backbone 特征编码成 query 特征）。本项目不训练 3D 骨干，只训练 <1M 参数的小头，输入是缓存 npz 里
+  的逐点几何（相对帧质心的 xyz、相对地面分位的高度、局部 PCA 法线与线状/面状/散射度）；缓存里没有
+  位姿，法线因此用不依赖符号的形式。该模块同时提供 P3D.0 的逐碎片几何描述子（16 维）。
 - 与 ESAM 的差别：ESAM 的 MergeHead 只回答"两个 query 是否同物"，没有节点质量回归，也没有"先把本帧
   碎片粘成 block 再跨帧比较"这一步（block 步骤来自第 1 阶段诊断出的失败模式）；ESAM 输出端会丢弃
   单帧物体，阶段 2 只做 NMS、不丢任何物体。训练数据由第 1 阶段的规则在线跑一遍采集（`window_data.py`），
