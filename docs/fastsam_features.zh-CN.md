@@ -40,6 +40,8 @@ FastSAM-x 是 **YOLOv8x-seg**，纯 CNN，没有 ViT block，也没有 SAM 的 2
 |---|---|---|
 | `backbone` | L9 | 最后一个 Transformer block 的输出（neck 之前） |
 | `neck_p3` | L15 | neck 输出：送给 mask 解码器（Proto）的特征 |
+| `neck_p4` | L18 | neck 三尺度中的 P4（stride 16） |
+| `neck_p5` | L21 | neck 三尺度中的 P5（stride 32） |
 | `neck_fpn` | concat(L15, ↑L18, ↑L21)，1600ch @ s8 | 多尺度 neck（SAM 没有） |
 | `proto_hidden` | Proto.cv2 | mask 解码器中间层 |
 | `proto` | Proto 输出 | mask 原型（最接近「逐像素 mask embedding」） |
@@ -60,3 +62,7 @@ FastSAM 的特征都在 SiLU 之后，基本为正，并且有很大的公共分
 （`neck_p3` 几乎所有 mask 对都在 0.85–1.0）。SAM 的 neck 以 LayerNorm 结尾，没有这个问题。
 所以提供了 `pooling.method=center_mean_l2`：先减去本帧所有点的特征均值，再做平均池化和
 L2 归一化。实验结果见 README。
+
+第 4 阶段（实例特征头）用到六个可分离的输入层：`backbone`(L9) + 三尺度 `neck_p3/p4/p5`
+(L15/L18/L21) + `proto_hidden`(Proto.cv2, 320ch, stride 4) + `proto`(32ch, stride 4)。
+`neck_p4`/`neck_p5` 是为逐层消融新增的单层入口，与 `neck_fpn`（三尺度拼接）并存。

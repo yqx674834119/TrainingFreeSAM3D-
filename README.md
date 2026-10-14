@@ -11,6 +11,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | Query Refinement / Decoder | 验证：ESAM 解码器 ≈ 把 FastSAM 组合并到 ScanNet 粒度 | ✅ 已验证，见 [docs/esam_granularity.zh-CN.md](docs/esam_granularity.zh-CN.md) |
 | 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
 | 统一 MergeNet（帧内 + 跨帧 + 物体合并 + 节点排序，一个模型） | `freesam3d/streaming/unified_flow.py`, `unified_train.py`, `merging/model.py` | ✅ 已完成：16 场景 AP50 0.422（旧管线 0.311、ESAM 0.589）；第 3 阶段（排序诊断 + 包含度去重）同水平——masks 74→60、dup_rate 0.24→0.17、AP 中性，见下与 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) |
+| 2D 实例特征头（第 4 阶段：冻结 FastSAM 多层特征 + PartField 式对比学习） | `freesam3d/models/instance_head.py` | ❌ 探针未过门槛（按规则未接入）：最难配对 0.672 vs 要求 0.85、手工 0.792，见下 |
 | 提议打分（从 FastSAM mask 层级里选） | `freesam3d/merging/proposals.py`, `scorer.py` | ✅ 见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md) |
 | Query Merging（跨帧，流式 Query Memory） | `freesam3d/streaming/` | ✅ 见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md) |
 | CVPR 投稿规划 | [docs/cvpr_plan.zh-CN.md](docs/cvpr_plan.zh-CN.md) | 📝 方法与实验设计初稿 |
@@ -109,6 +110,24 @@ dup_rate 0.240→0.168、frags/GT 1.21→0.97，AP50 0.422→0.413（留出 +0.0
 38% 的完美排序空间，oracle 上界 0.636 仍高于 ESAM 0.589——差距结构与第 2 阶段一致。耗时 53.6 ms/帧
 （阶段 3 模块）。完整回答见 `work_dirs/stream_v2/phase3/summary.md`，逐条发现见
 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的「阶段 3」（F3.1–F3.6）。
+
+## 实例特征头 · 第 4 阶段（探针，未接入）
+
+冻结 FastSAM 六层特征（backbone / neck_p3–p5 / proto_hidden / proto）训一个 258 592 参数的 2D 实例头
+（PartField 式多正样本 InfoNCE + 3D 与特征困难负样本，3 个种子，6.4 分钟/种子），碎片特征 = 成员点
+特征均值（点级先减帧均值再 L2）。在 60 个留出场景、与 F1.7 完全相同的配对上探针（14.2 万条跨帧边、
+11.3 万条帧内边）：
+
+| 最难配对（再观测 vs 相邻不同物体） | 帧内相邻碎片 | 全部跨帧边 |
+|---|---|---|
+| 学到 0.672±0.003 | 0.719±0.003 | 0.673±0.004 |
+| 手工 15 列 0.792 | GroupMergeNet 0.869 | 手工 15 列 0.820 |
+
+门槛（最难 ≥0.85 且帧内 ≥GroupMergeNet）3/3 种子未过，按任务书「过门槛才接入」停止：第 5 步三臂
+对比与验证集重跑未做，统一流程最终配置与第 3 阶段相同。逐层消融（去掉任何一层都不变好，neck_p4
+贡献最大、neck_p3≈0）与瓶颈判断（训练配方为主因：头弱于它自己的输入；纯外观路线有真实上限：补上
+接触量也只有 0.736 < 0.792）见 `work_dirs/stream_v2/phase4/summary.md` 与
+[docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的「阶段 4」（F4.1–F4.7）。
 
 ## 模块 1：Query Lifting
 

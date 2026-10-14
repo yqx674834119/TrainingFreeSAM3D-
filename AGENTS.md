@@ -16,7 +16,7 @@ TrainingFreeSAM3D/
 ├── freesam3d/              # 唯一的库代码包，按“职责”分子包
 │   ├── config.py           #   读取 YAML + 命令行覆盖
 │   ├── io/                 #   数据读写：RGB-D 帧、ScanNet GT（不做算法）
-│   ├── models/             #   冻结模型封装：FastSAM 分割 + 特征 hook
+│   ├── models/             #   冻结模型封装：FastSAM 分割 + 特征 hook；实例特征头(instance_head)
 │   ├── lifting/            #   ESAM「Query Lifting」对标模块
 │   │   ├── geometry.py     #     深度反投影、世界坐标、20k 采样
 │   │   ├── grouping.py     #     重叠 mask → 互斥分组、未覆盖点补组
@@ -40,8 +40,8 @@ TrainingFreeSAM3D/
 │   │                       #     阶段 2 统一分组(unified_flow：帧内 / block<->object / object<->object
 │   │                       #     三类边共用一个模型 + 节点质量头)、训练图采集(window_data)、
 │   │                       #     统一模型训练(unified_train)、留出阈值扫描(unified_sweep)、
-│   │                       #     未分配 block 归因(unified_probe)
-│   └── vis/                #   所有画图/导出 PLY 的代码
+│   │                       #     未分配 block 归因(unified_probe)、阶段 4 探针(phase4_probe)
+│   └── vis/                #   所有画图/导出 PLY 的代码（含阶段 4 训练曲线）
 ├── tools/                  # 命令行入口脚本：只做参数解析 + 调用 freesam3d
 ├── tests/                  # pytest 单元测试（不依赖 GPU/权重的部分必须可离线跑）
 └── work_dirs/              # 所有生成结果（git 忽略）；绝不从这里 import 代码

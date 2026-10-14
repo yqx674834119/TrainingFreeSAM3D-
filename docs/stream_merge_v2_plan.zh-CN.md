@@ -440,6 +440,19 @@ cluster 0.4±0.1 ＋ assign 17.7±5.1，按场景均值±标准差）；隔离�
 
 ---
 
+## 7b. 阶段 4：2D 实例特征头（2026-10-14，已完成；门槛未过，未接入）
+
+- **协议**：冻结 FastSAM 六层特征（backbone / neck_p3 / neck_p4 / neck_p5 / proto_hidden / proto）
+  训一个 258 592 参数的 2D 实例头（PartField 式多正样本 InfoNCE + 3D 与特征困难负样本，3 个种子）；
+  探针在 60 个留出场景上用与 F1.7 完全相同的配对，门槛 = 最难配对 ≥0.85 且帧内不低于 GroupMergeNet。
+- **结果**：门槛 3/3 种子未过（最难 0.672±0.003 vs 手工 0.792；帧内 0.719 vs 0.869）；逐层消融
+  （F4.6）显示换层组合救不了；判定训练配方为主因、纯外观路线有真实上限（F4.7）。
+- **按规则停止**：任务书 §五「过门槛才接入」——第 5 步三臂对比与 16 个验证场景重跑都未做；统一流程
+  最终配置与第 3 阶段相同（AP50 0.422 / oracle 0.635 / ESAM 0.589），`merge_cache/val` 未被改动。
+- **产物**：`freesam3d/models/instance_head.py`、`freesam3d/streaming/phase4_probe.py`、
+  `freesam3d/vis/phase4.py`、`tools/phase4_{train_head,build_feats,probe,ablate_layers,timing}.py`、
+  `tests/test_instance_head.py`（20 个 CPU 测试）；结果在 `work_dirs/stream_v2/phase4/`；发现 F4.1–F4.7。
+
 ## 8. 汇报节点汇总
 
 | 节点 | 时机 | 内容 | 是否等待用户 |

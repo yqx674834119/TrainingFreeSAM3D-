@@ -18,6 +18,8 @@ import torch.nn.functional as F
 FEATURE_SPECS = {
     'backbone':     (('L9',), 32, 'SAM 最后一个 Transformer block 输出（neck 之前）'),
     'neck_p3':      (('L15',), 8, 'SAM neck 输出（mask 解码器的输入）；P3 是 Proto 的输入'),
+    'neck_p4':      (('L18',), 16, 'neck 三尺度中的 P4（stride 16，上采样前的原尺度）'),
+    'neck_p5':      (('L21',), 32, 'neck 三尺度中的 P5（stride 32，上采样前的原尺度）'),
     'neck_fpn':     (('L15', 'L18', 'L21'), 8, 'neck 三尺度 P3/P4/P5 上采样到 stride 8 后拼接'),
     'proto_hidden': (('proto_hidden',), 4, 'mask 解码器内部（Proto.cv2 输出）'),
     'proto':        (('proto',), 4, 'mask 原型（32 维），实例 mask = 系数 · 原型'),
