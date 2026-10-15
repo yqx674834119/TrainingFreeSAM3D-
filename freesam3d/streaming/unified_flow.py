@@ -33,8 +33,8 @@ import torch
 
 from ..merging.graph import edge_feature_names
 from . import two_step
-from .pair_features import (NodeStats, node_relations, pair_feature_names, pair_features,
-                            rel_feature_names)
+from .pair_features import (NodeStats, geom_pair_names, node_relations, pair_feature_names,
+                            pair_features, rel_feature_names)
 from .voxel import dilate_sets, overlap_matrix
 
 # node types: 0 current-frame fragment, 1 current-frame block, 2 history object
@@ -141,6 +141,7 @@ class UnifiedGrouping:
     def assign(self, mem, graph, node_prev, node_n, num_cur, n_own, n_vox, f_vox_list, stats_cur, pos):
         """Per-node object ids (same contract as ``WindowMemory._assign``) plus the frame's products."""
         cfg, dev = mem.cfg, mem.device
+        n_pair = N_PAIR + (len(geom_pair_names()) if cfg.geom_pair else 0)
         t_bo = cfg.bo_threshold if cfg.bo_threshold is not None else cfg.cross_threshold
         t_oo = cfg.oo_threshold if cfg.oo_threshold is not None else cfg.cross_threshold
         info = {}
@@ -157,7 +158,7 @@ class UnifiedGrouping:
                 np.zeros(len(intra), np.int64), np.ones(num_cur, np.float32), np.zeros(num_cur, np.float32))
             prob_i = prob_i.cpu().numpy()
         else:
-            pf_i, prob_i = torch.zeros((0, N_PAIR), device=dev), np.zeros(0, np.float64)
+            pf_i, prob_i = torch.zeros((0, n_pair), device=dev), np.zeros(0, np.float64)
             q_frag = torch.zeros(num_cur, device=dev)
         block = (two_step.intra_blocks(num_cur, intra, prob_i, cfg.threshold, cfg.linkage)
                  if num_cur else np.zeros(0, np.int64))
@@ -182,7 +183,7 @@ class UnifiedGrouping:
                         block_n=np.zeros(0), edges=np.zeros((0, 2), np.int64), edge_type=np.zeros(0, np.int64),
                         prob_cross=np.zeros(0), q_cross=np.zeros(0), block_obj=np.full(0, -1, np.int64),
                         new_obj=np.full(0, -1, np.int64), remap={}, merged=[], intra=intra_info,
-                        cross=dict(edges=np.zeros((0, 2), np.int64), pair_feat=np.zeros((0, N_PAIR), np.float32),
+                        cross=dict(edges=np.zeros((0, 2), np.int64), pair_feat=np.zeros((0, n_pair), np.float32),
                                    node_geom=np.zeros((0, 11), np.float32), node_feat=np.zeros((0, mem.feat_dim), np.float32),
                                    node_type=np.zeros(0, np.int64), n_frames=np.zeros(0, np.float32),
                                    age=np.zeros(0, np.float32),
@@ -227,11 +228,13 @@ class UnifiedGrouping:
         is_block = (a < num_blocks) if num_blocks else torch.zeros(len(a), dtype=torch.bool, device=dev)
         etype = np.where(is_block.cpu().numpy() != (b < num_blocks).cpu().numpy(), BLOCK_OBJECT, OBJECT_OBJECT)
         age_t = torch.as_tensor(age_c, device=dev)
+        gm = cross_stats.geom(graph.z_ref) if cfg.geom_pair else None
         pf_c = pair_features(cross_stats, a, b, inter0[a, b], inter1[a, b], size_c, size_c,
                              (age_t[a] - age_t[b]).abs(),
                              torch.zeros(len(a), dtype=torch.bool, device=dev),
                              torch.zeros(len(a), dtype=torch.bool, device=dev),
-                             (a >= num_blocks).float() + (b >= num_blocks).float())
+                             (a >= num_blocks).float() + (b >= num_blocks).float(),
+                             geom_a=None if gm is None else gm[a], geom_b=None if gm is None else gm[b])
         join = torch.zeros((n_cross, 3), device=dev)         # stage-3 join statistics per node
         for k, oid in enumerate(obj_ids):
             rec = mem.objects[oid]

@@ -48,6 +48,9 @@ class WindowConfig:
     # cosine is above ``cand_cos`` (both None = off; read by ``UnifiedGrouping.assign``)
     cand_dist: float = None
     cand_cos: float = None
+    # stage 5 (P4): append the 44-column pairwise-geometry block ([e_a, e_b, e_a*e_b,
+    # |e_a-e_b|] from the two endpoints' 11-dim node_geom) to every edge feature
+    geom_pair: bool = False
 
 
 @dataclass
@@ -258,11 +261,13 @@ class WindowMemory:
         if bool(sel.any()):
             ef[sel] = torch.as_tensor(np.asarray(frame.edge_feat, np.float32), device=dev)[rows[sel]]
         age = pos - stats.last
+        gm = stats.geom(z_ref) if cfg.geom_pair else None
         graph = PairGraph(
             edges=torch.stack([a, b], 1).cpu().numpy(), pair_feat=pair_features(
                 stats, a, b, inter0[a, b], inter1[a, b], va, vb,
                 (age[a] - age[b]).abs(), (kind_t[a] == 0) & (kind_t[b] == 0), sel,
-                (kind_t[a] == 2).float() + (kind_t[b] == 2).float(), edge_feat=ef),
+                (kind_t[a] == 2).float() + (kind_t[b] == 2).float(), edge_feat=ef,
+                geom_a=None if gm is None else gm[a], geom_b=None if gm is None else gm[b]),
             has_intra=sel, node_major=major, node_purity=purity, node_n=stats.n.cpu().numpy(),
             node_type=np.asarray(node_kind), node_prev_obj=np.asarray(node_prev),
             node_geom=stats.geom(z_ref).cpu().numpy(), node_feat=stats.feat().cpu().numpy(),

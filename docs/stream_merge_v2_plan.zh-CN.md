@@ -478,6 +478,26 @@ cluster 0.4±0.1 ＋ assign 17.7±5.1，按场景均值±标准差）；隔离�
   （`--layer` / `--descriptor` / `--no-center`）；结果在 `work_dirs/stream_v2/phase4b/`；发现 F4b.1–F4b.7；
   `pytest -q tests` 184 个 CPU 测试全绿。
 
+## 7d. 阶段 5：攻排序瓶颈（2026-10-14，已完成；P4 端到端未过门槛，未接入）
+
+任务书把留出 AP50 的 0.213 缺口（quality 0.3069 → 完美排序 0.4519）定位在排序上，预登记判定线
+（X ≥ 0.58 训头 / ≥ 0.48 只做最便宜两条 / < 0.48 走 P3·P4）。所有选择只在 60 个留出场景上做；
+16 个验证场景未重跑；任何改动进最终配置需 3 个种子一致且留出 AP50 ≥ +0.01。
+
+- **P1 排序信息上限（不训练）**：口径逐位复现第 3 阶段留出扫描。全特征留一逻辑回归 X = 0.2642
+  （r = −0.295；GBM 0.2928；加现有头 0.3437，r = 0.254）→ **C 档：缺口是信息，不训排序头**
+  （P2 按任务书跳过）。外观族每空间只有 1 个自由度（相干度）；规模类是仅有的正相关族。见 F5.1。
+- **P3 掩码集合上界**：原始池 oracle 0.3199（∪现有 + 去重 0.5214，需要给原始提议配打分器，未实现）；
+  GT 切割上界 0.6964/0.6471，但连通裁剪 +0.02、外观一致性裁剪 +0.005，均 < +0.05 建造线 →
+  不实现拆分机制；「22% 混合」前提修正；去重不改变 oracle 上界。见 F5.2。
+- **P4 成对几何边（只做一次）**：44 列 [e_a,e_b,e_a⊙e_b,|e_a−e_b|] 追加在 29 列之后；离线扩列
+  A 轮图（`tools/phase5_p4_graphs.py`），推理端 `phase5.p4.geom_pair` 开关（默认关）；
+  `init_from` 的截断语义天然兼容 73 列（共享前缀 [2h, ef14] 不变）。探针：最难配对 hand15 0.7923 →
+  hand15+new44 0.8025 ≥ 0.7623 门槛 → 过；端到端 seed0 未过（quality 0.2832 vs 基线 0.3069，oracle 0.4358 vs 0.4519）→ 不接入。见 F5.3/F5.4。
+- 新文件：`freesam3d/analysis/{rank_probe,bounds}.py`、`freesam3d/streaming/phase4_probe.py`（with_geom 扩展）、
+  `tools/phase5_{rank_probe,bounds,p4_graphs,p4_probe}.py`、`tests/test_{rank_probe,phase5_bounds,phase5_pair_geom}.py`
+  与 test_phase3 的 geom_pair 用例；`pytest -q tests` 206 全绿。
+
 ## 8. 汇报节点汇总
 
 | 节点 | 时机 | 内容 | 是否等待用户 |

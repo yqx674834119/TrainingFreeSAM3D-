@@ -25,6 +25,22 @@ def cross_feature_names():
     return list(CROSS_FEATURE_NAMES)
 
 
+# 阶段 5 · P4：成对几何边特征（两个端点的 11 维 node_geom 对称编码；追加在 15 列跨帧列之后，
+# 现有列下标不变）。默认关：pair_feature_names() 仍是 29 列。
+GEOM_NAMES = ('logsize', 'height', 'ext_x', 'ext_y', 'ext_z', 'ev1', 'ev2', 'ev3',
+              'rgb_r', 'rgb_g', 'rgb_b')
+
+
+def geom_pair_names():
+    return ([f'a_{n}' for n in GEOM_NAMES] + [f'b_{n}' for n in GEOM_NAMES]
+            + [f'ab_{n}' for n in GEOM_NAMES] + [f'd_{n}' for n in GEOM_NAMES])
+
+
+def geom_pair_features(geom_a, geom_b):
+    """(E,44) 对称成对几何编码 [e_a, e_b, e_a⊙e_b, |e_a−e_b|]（各 11 列）。"""
+    return torch.cat([geom_a, geom_b, geom_a * geom_b, (geom_a - geom_b).abs()], 1)
+
+
 # Stage-3 relational node columns: what a node's neighbours look like, aggregated per node.
 REL_FEATURE_NAMES = ['rel_max_iou', 'rel_max_contain_in', 'rel_max_contain_out', 'rel_n_inter_log',
                      'rel_is_largest', 'rel_join_n_log', 'rel_join_mean', 'rel_join_min']
@@ -34,9 +50,10 @@ def rel_feature_names():
     return list(REL_FEATURE_NAMES)
 
 
-def pair_feature_names():
+def pair_feature_names(geom_pair=False):
     """Full edge feature layout: the 14 intra-frame features, then the 15 cross-frame ones."""
-    return edge_feature_names() + cross_feature_names()
+    names = edge_feature_names() + cross_feature_names()
+    return names + (geom_pair_names() if geom_pair else [])
 
 
 @dataclass
@@ -140,8 +157,8 @@ class NodeStats:
 
 
 def pair_features(stats, a, b, inter0, inter1, va, vb, frame_gap, same_frame, has_intra, frozen_count,
-                  edge_feat=None):
-    """(E, 29) edge features for the node pairs ``(a, b)``.
+                  edge_feat=None, geom_a=None, geom_b=None):
+    """(E, 29) edge features for the node pairs ``(a, b)``; (E, 73) when ``geom_a``/``geom_b`` are given.
 
     ``inter0``/``inter1`` are the voxel intersection counts without / with one-sided dilation,
     ``va``/``vb`` the per-node voxel counts (from ``overlap_matrix``). ``edge_feat`` (E,14) are
@@ -167,6 +184,8 @@ def pair_features(stats, a, b, inter0, inter1, va, vb, frame_gap, same_frame, ha
         (feat[a] * feat[b]).sum(1),
         frame_gap.float(), same_frame.float(), has_intra.float(), frozen_count.float(),
     ], 1)
+    if geom_a is not None:
+        cross = torch.cat([cross, geom_pair_features(geom_a, geom_b)], 1)
     if edge_feat is None:
         edge_feat = torch.zeros((len(cross), len(edge_feature_names())), device=dev)
     return torch.cat([edge_feat, cross], 1)

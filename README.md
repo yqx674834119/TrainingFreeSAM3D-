@@ -12,6 +12,7 @@ ESAM（训练版）的 training-free 平行实现：只用冻结的 **FastSAM-x*
 | 轻量合并模型 GroupMergeNet | `freesam3d/merging/` | ✅ 已训练，见 [docs/merge_net.zh-CN.md](docs/merge_net.zh-CN.md)（设计：[merge_net_design](docs/merge_net_design.zh-CN.md)） |
 | 统一 MergeNet（帧内 + 跨帧 + 物体合并 + 节点排序，一个模型） | `freesam3d/streaming/unified_flow.py`, `unified_train.py`, `merging/model.py` | ✅ 已完成：16 场景 AP50 0.422（旧管线 0.311、ESAM 0.589）；第 3 阶段（排序诊断 + 包含度去重）同水平——masks 74→60、dup_rate 0.24→0.17、AP 中性，见下与 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) |
 | 2D 实例特征头（第 4 阶段：冻结 FastSAM 多层特征 + PartField 式对比学习） | `freesam3d/models/instance_head.py` | ❌ 探针未过门槛（按规则未接入）：最难配对 0.672（手工 0.792）；第 4b 阶段修配方后仍只有 0.653，而外观信息上限本身只有 0.721——原 0.85 门槛属标定错误，见下 |
+| 排序瓶颈（第 5 阶段：排序上限 / 掩码集合上界 / 成对几何边） | `freesam3d/analysis/`, `tools/phase5_*.py` | ✅ 已完成（结论均为负）：P1 判定缺口是信息、不训排序头；P3 三个机制不达建造线；P4 探针过门槛但端到端未过、不接入，见下 |
 | 提议打分（从 FastSAM mask 层级里选） | `freesam3d/merging/proposals.py`, `scorer.py` | ✅ 见 [docs/mask_scorer.zh-CN.md](docs/mask_scorer.zh-CN.md) |
 | Query Merging（跨帧，流式 Query Memory） | `freesam3d/streaming/` | ✅ 见 [docs/streaming.zh-CN.md](docs/streaming.zh-CN.md) |
 | CVPR 投稿规划 | [docs/cvpr_plan.zh-CN.md](docs/cvpr_plan.zh-CN.md) | 📝 方法与实验设计初稿 |
@@ -152,6 +153,28 @@ dup_rate 0.240→0.168、frags/GT 1.21→0.97，AP50 0.422→0.413（留出 +0.0
 
 完整回答见 `work_dirs/stream_v2/phase4b/summary.md`，逐条发现见
 [docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的「阶段 4b」（F4b.1–F4b.7）。
+
+## 排序瓶颈 · 第 5 阶段（排序上限 / 掩码集合上界 / 成对几何边，未接入）
+
+任务书把留出 AP50 的 0.213 缺口（quality 0.3069 → 完美排序 0.4519）定位在排序上。
+第 5 阶段先量信息上限再决定是否训排序头（全部只在 60 个留出场景上做，16 个验证场景未重跑）：
+
+- **P1（排序信息上限，不训练）**：口径逐位复现第 3 阶段留出扫描。每族特征（self / 外观 / 阶段 4 头 /
+  关系 / 时序）的留一逻辑回归 AP50 天花板都低于现有头（0.19–0.23 vs 0.3069）；全特征 0.2642
+  （GBM 0.2928；再加现有头输出 0.3437）→ **C 档：缺口是信息，不训排序头**（P2 按任务书跳过）。
+  外观族每空间只有 1 个自由度（相干度）；规模类是仅有的正相关族。
+- **P3（掩码集合上界）**：原始 FastSAM mask 全池单独更差（0.3199）；∪现有候选 + 去重 0.5214
+  （需要给原始提议配打分器，未实现）；GT 切割上界 0.6964，但可实现机制只到 +0.02（连通裁剪）/
+  +0.005（外观一致性裁剪），均 < +0.05 建造线 → 不实现拆分机制；「22% 混合」前提修正（混合候选
+  只占漏检候选约 10%）；去重不改变 oracle 上界。
+- **P4（成对几何边，只做一次）**：44 列 [e_a,e_b,e_a⊙e_b,|e_a−e_b|] 追加在 29 列后（离线扩列 A 轮图 +
+  `phase5.p4.geom_pair` 开关，默认关）。探针过门槛（最难配对 hand15 0.7923 → 0.8025 ≥ 0.7623），
+  但端到端 seed0 未过：quality 0.2832 vs 基线 0.3069、oracle 0.4358 vs
+  0.4519，且低于基线三个种子的最差（0.3069/0.3020/0.2932，非种子波动）→ **不接入**（训练图 AUC 变好没有迁移到留出，见 F5.4）。
+- **16 个验证场景未重跑**（最终配置未变：AP50 0.422 / oracle 0.635 / ESAM 0.589）；`merge_cache/val` 未改动。
+
+完整回答见 `work_dirs/stream_v2/phase5/summary.md`，逐条发现见
+[docs/findings.zh-CN.md](docs/findings.zh-CN.md) 的「阶段 5」（F5.1–F5.4）。
 
 ## 模块 1：Query Lifting
 

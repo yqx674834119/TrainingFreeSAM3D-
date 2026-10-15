@@ -196,3 +196,18 @@ phase4b:
     hard_warmup_epochs: 2     # 第 3 条：前 N 个 epoch 关困难挖掘（先易后难）
     # 第 2 条（物体级目标为主）与第 4 条（预算 ×10）按 §一 判定不做——最好原始层 0.7208 落在
     # 0.70–0.78 区间，只做低成本修复。
+
+# ---- 阶段 5：攻排序瓶颈（P1 排序信息上限 → P2 排序头 → P3 掩码集合上界 → P4 成对几何边）
+phase5:
+  out_root: work_dirs/stream_v2/phase5
+  rank_probe:                    # P1：不训练，只量排序的信息上限（60 个留出场景）
+    checkpoint: work_dirs/stream_v2/phase2/model/A/seed0/model.pt   # 第 3 阶段最终配置（A 轮 seed0）
+    thresholds: [0.75, 0.60, 1.01]   # intra / block-object / object-object（与 phase3 最终报告一致）
+    dedup: 0.7                       # 第 3 阶段最终包含度去重阈值（报告里另给 +去重 行）
+    head: work_dirs/stream_v2/phase4/head/seed0/head.pt   # 外观消融：阶段 4 的 2D 实例头
+  bounds:                        # P3：掩码集合上界（原始 mask 池 / 拆分 / 去重）
+    out: work_dirs/stream_v2/phase5/bounds
+  p4:                            # P4：成对几何边特征（只做一次；默认关）
+    geom_pair: false             # true = 每条边特征追加 44 列 [e_a,e_b,e_a*e_b,|e_a-e_b|]
+    graphs: work_dirs/stream_v2/phase5/p4/graphs/A   # 离线扩列后的 A 轮训练图
+    out: work_dirs/stream_v2/phase5/p4               # 模型 / 探针 / sweep 输出

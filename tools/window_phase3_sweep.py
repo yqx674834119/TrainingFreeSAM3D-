@@ -69,6 +69,8 @@ def main():
     p.add_argument('--touch-dilation', type=int, default=None)
     p.add_argument('--cand-dist', type=float, default=None)
     p.add_argument('--cand-cos', type=float, default=None)
+    p.add_argument('--geom-pair', action='store_true',
+                   help='stage-5 P4: memory appends the 44-col pairwise-geometry block to edge features')
     p.add_argument('--shard', default='0/1')
     p.add_argument('--limit', type=int, default=0)
     p.add_argument('--report', action='store_true')
@@ -103,6 +105,8 @@ def main():
         mem_over['cand_dist'] = float(a.cand_dist)
     if a.cand_cos is not None:
         mem_over['cand_cos'] = float(a.cand_cos)
+    if a.geom_pair or bool(cfg.get('phase5', {}).get('p4', {}).get('geom_pair', False)):
+        mem_over['geom_pair'] = True
     grid = triples(a.intra, a.bo, a.oo)
     names = variant_names(a.dedup)
     print(f'{len(grid)} triples x {len(scenes)} holdout scenes, overrides {mem_over} -> {out}', flush=True)

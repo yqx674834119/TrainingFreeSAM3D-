@@ -13,6 +13,7 @@ from freesam3d.streaming.phase3_eval import eval_objects, pred_masks, voxel_gt
 from freesam3d.streaming.unified_dedup import (containment_suppress, dedup_masks, dedup_objects,
                                                mask_containment, voxel_containment)
 from freesam3d.streaming.unified_flow import N_PAIR, UnifiedGrouping
+from freesam3d.streaming.pair_features import geom_pair_features  # noqa: E402
 from freesam3d.streaming.unified_train import GraphSet, rank_loss
 from freesam3d.streaming.voxel import voxelize
 from freesam3d.streaming.window_data import pack, save
@@ -349,3 +350,28 @@ def test_attention_frame_id_none_matches_single_frame():
     split = attn(h, obj, torch.tensor([0, 0, 0, 1, 1, 1, 1]))
     assert not torch.allclose(a[obj], split[obj], atol=1e-6)     # the mask really splits the frames
     assert torch.allclose(a[~obj], h[~obj], atol=1e-6)           # non-object rows pass through
+
+
+def test_geom_pair_extends_edge_features_and_keeps_the_first_29():
+    """阶段 5 · P4：geom_pair=True 时每条边追加 44 列成对几何，前 29 列逐位不变。"""
+    def blob(x0):
+        g = np.stack(np.meshgrid(np.linspace(0, 0.09, 6), np.linspace(0, 0.09, 6),
+                                 np.linspace(0, 0.09, 4)), -1).reshape(-1, 3)
+        return (g + np.array([x0, 0.0, 0.0], np.float32)).astype(np.float32)
+
+    frames = [_frame([blob(0.0), blob(0.09)], fid=0), _frame([blob(0.09)], fid=1)]
+    base = _memory()
+    for fr in frames:
+        base.update(fr)
+    g0 = base.last_graph
+    assert g0.pair_feat.shape[1] == 29
+    ext = _memory(geom_pair=True)
+    for fr in frames:
+        ext.update(fr)
+    g1 = ext.last_graph
+    assert g1.pair_feat.shape[1] == 73 and len(g1.edges) > 0
+    assert torch.equal(g1.pair_feat[:, :29], g0.pair_feat)
+    gm = torch.as_tensor(g1.node_geom, dtype=torch.float32)
+    e = torch.as_tensor(g1.edges, dtype=torch.int64)
+    assert torch.allclose(g1.pair_feat[:, 29:], geom_pair_features(gm[e[:, 0]], gm[e[:, 1]]),
+                          atol=1e-6)

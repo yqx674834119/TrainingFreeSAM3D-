@@ -63,6 +63,11 @@ class GraphSet:
                 ptr_i, ptr_c = z['node_ptr_i'], z['node_ptr_c']
                 ep_i, ep_c = z['edge_ptr_i'], z['edge_ptr_c']
                 self.feat_dim = int(z['feat_dim'])
+                pd = int(z['pf_i'].shape[1])
+                if fi == 0:
+                    self.pair_dim = pd
+                elif pd != self.pair_dim:
+                    raise SystemExit(f'pair feature width differs: {path} has {pd}, expected {self.pair_dim}')
             for t in range(nf):
                 for tag, ptr, ep in (('i', ptr_i, ep_i), ('c', ptr_c, ep_c)):
                     if t + 1 >= len(ptr):        # an empty side (the intra-only cache) has no frames
@@ -273,11 +278,11 @@ def fit_standardizer(graphs, limit=120, seed=0, log=print):
     return std
 
 
-def build_unified_model(cfg, feat_dim, device='cpu', log=print):
+def build_unified_model(cfg, feat_dim, device='cpu', log=print, pair_dim=N_PAIR):
     pc = cfg['phase2']
     p3 = cfg.get('phase3', {})
     rel_dim = len(rel_feature_names()) if p3.get('rel', False) else 0
-    model = UnifiedMergeNet(NODE_GEOM, feat_dim, N_PAIR, hidden=int(pc['hidden']),
+    model = UnifiedMergeNet(NODE_GEOM, feat_dim, pair_dim, hidden=int(pc['hidden']),
                             feature_proj=int(pc['feature_proj']),
                             dropout=float(pc['dropout']), rel_dim=rel_dim,
                             attn_layers=int(p3.get('attn_layers', 0))).to(device)
@@ -299,7 +304,7 @@ def train(graphs, cfg, device='cpu', seed=0, log=print, epochs=None, frames_per_
     frames_per_step = int(pc['frames_per_step'] if frames_per_step is None else frames_per_step)
     torch.manual_seed(seed)
     std = fit_standardizer(graphs, limit=int(pc.get('fit_files', 120)), seed=seed, log=log)
-    model = build_unified_model(cfg, graphs.feat_dim, device, log=log)
+    model = build_unified_model(cfg, graphs.feat_dim, device, log=log, pair_dim=graphs.pair_dim)
     opt = torch.optim.AdamW(model.parameters(), lr=float(pc['lr']), weight_decay=float(pc['weight_decay']))
     steps = max(1, -(-len(graphs) // frames_per_step))   # batches() always yields ceil(n / fps)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=float(pc['lr']), total_steps=epochs * steps)
@@ -334,7 +339,7 @@ def train(graphs, cfg, device='cpu', seed=0, log=print, epochs=None, frames_per_
                 f'rank {history[-1]["rank"]:.4f})')
     model.eval()
     return model, std, dict(history=history, seed=seed, params=model.num_params(),
-                            frames=len(graphs), feat_dim=graphs.feat_dim)
+                            frames=len(graphs), feat_dim=graphs.feat_dim, pair_dim=graphs.pair_dim)
 
 
 # ------------------------------------------------------------------ checkpoints
@@ -342,6 +347,7 @@ def save_unified_checkpoint(path, model, std, cfg, extra=None):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(dict(state_dict=model.state_dict(), standardizer=std.state(), config=cfg,
                     feat_dim=int(model.proj.in_features),
+                    pair_dim=int(model.edge_dim),
                     rel_dim=int(getattr(model, 'rel_dim', 0)),
                     attn_layers=int(getattr(model, 'attn_layers', 0)), **(extra or {})), path)
 
@@ -350,7 +356,7 @@ def load_unified_checkpoint(path, device='cpu'):
     """The stage-2 model plus its standardizer - same contract as ``load_group_merge_net``."""
     ck = torch.load(path, map_location=device, weights_only=False)
     pc = ck['config']['phase2']
-    model = UnifiedMergeNet(NODE_GEOM, int(ck['feat_dim']), N_PAIR, hidden=int(pc['hidden']),
+    model = UnifiedMergeNet(NODE_GEOM, int(ck['feat_dim']), int(ck.get('pair_dim', N_PAIR)), hidden=int(pc['hidden']),
                             feature_proj=int(pc['feature_proj']),
                             dropout=float(pc['dropout']), rel_dim=int(ck.get('rel_dim', 0)),
                             attn_layers=int(ck.get('attn_layers', 0))).to(device)

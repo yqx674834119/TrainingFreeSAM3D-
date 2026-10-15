@@ -20,10 +20,12 @@ from .window_probe import POS_PURITY, RELATION_PAIRS, column_auc, logistic_auc, 
 CROSS_N = len(cross_feature_names())
 
 
-def collect_phase4_pairs(frames, variant, model, std, cfg, device, feats_dir, purity=POS_PURITY):
+def collect_phase4_pairs(frames, variant, model, std, cfg, device, feats_dir, purity=POS_PURITY,
+                       with_geom=False):
     """Stream the frames through the variant's memory; keep every labeled cross-frame edge
     (learned cosine + the 15 hand columns + gap + relation) and every labeled intra-frame edge
-    (learned cosine + the 14 cached columns + the driver's probability)."""
+    (learned cosine + the 14 cached columns + the driver's probability). ``with_geom``
+    additionally keeps the 44-column pairwise geometry of both ends (stage-5 P4)."""
     from ..models.instance_head import load_feature_cache
     from .holdout import make_memory
     from .two_step import as_bool_np
@@ -33,6 +35,8 @@ def collect_phase4_pairs(frames, variant, model, std, cfg, device, feats_dir, pu
     ca, cb = names.index('contain_a_in_b'), names.index('contain_b_in_a')
     keys = ('cos', 'hand', 'y', 'valid', 'rel', 'scene', 'fi', 'gap', 'types',
             'intra_cos', 'intra_hand', 'intra_prob', 'intra_y', 'intra_valid', 'intra_scene', 'intra_fi')
+    if with_geom:                     # stage-5 P4: [e_a, e_b, e_a*e_b, |e_a-e_b|] of both ends
+        keys += ('geom', 'intra_geom')
     acc = {k: [] for k in keys}
     obj_sum, obj_cnt, obj_last = {}, {}, {}
     orig_merge = mem._merge_objects
@@ -68,6 +72,9 @@ def collect_phase4_pairs(frames, variant, model, std, cfg, device, feats_dir, pu
             pf = g.pair_feat.cpu().numpy()
             intra = as_bool_np(g.has_intra)
             a, b = e[:, 0], e[:, 1]
+            if with_geom:
+                gm = np.asarray(g.node_geom, np.float64)
+                geom44 = np.concatenate([gm[a], gm[b], gm[a] * gm[b], np.abs(gm[a] - gm[b])], 1)
             pure = (pur >= purity) & (major > 0)
             same, valid = major[a] == major[b], pure[a] & pure[b]
             last = np.array([obj_last.get(int(prev[j]), -10 ** 9) if kind[j] == 2 else fi
@@ -83,6 +90,8 @@ def collect_phase4_pairs(frames, variant, model, std, cfg, device, feats_dir, pu
                 acc['scene'].append(np.full(int(sel.sum()), fr.scene, dtype=object))
                 acc['fi'].append(np.full(int(sel.sum()), fi)); acc['gap'].append(gap[sel])
                 acc['types'].append(np.stack([kind[a[sel]], kind[b[sel]]], 1))
+                if with_geom:
+                    acc['geom'].append(geom44[sel])
             sel = intra
             if sel.any():
                 acc['intra_cos'].append(cosv[sel]); acc['intra_hand'].append(pf[sel][:, :14])
@@ -90,6 +99,8 @@ def collect_phase4_pairs(frames, variant, model, std, cfg, device, feats_dir, pu
                 acc['intra_valid'].append(valid[sel])
                 acc['intra_scene'].append(np.full(int(sel.sum()), fr.scene, dtype=object))
                 acc['intra_fi'].append(np.full(int(sel.sum()), fi))
+                if with_geom:
+                    acc['intra_geom'].append(geom44[sel])
         # accumulate this frame's contributions *after* scoring (objects are scored on the past)
         frag_obj = np.full(num_cur, -1, np.int64)
         frag_obj[np.asarray(fr.groups, np.int64)] = pt_obj
@@ -166,4 +177,34 @@ def phase4_report(pairs, purity=POS_PURITY):
         hardest_ge_0_85=bool(rep['hardest_reobserve_vs_adjacent']['learned_logistic'] >= 0.85),
         intra_not_below_groupmerge=bool(rep['intra']['learned_col'] >= rep['intra']['groupmerge_prob_col']))
     rep['gate']['passed'] = bool(rep['gate']['hardest_ge_0_85'] and rep['gate']['intra_not_below_groupmerge'])
+    return rep
+
+
+def _geom_block(hand, geom, y, scene):
+    """One labeled pair set (stage-5 P4): hand15 / new44 / hand15+new44 logistic AUCs, the same
+    leave-one-scene-out caliber as ``_cross_block``."""
+    hand = np.asarray(hand, np.float64)
+    geom = np.asarray(geom, np.float64)
+    return dict(n=int(len(y)), n_pos=int(np.asarray(y).sum()),
+                hand15_logistic=float(logistic_auc(hand, y, scene)),
+                new44_logistic=float(logistic_auc(geom, y, scene)),
+                hand15_plus_new44_logistic=float(logistic_auc(np.c_[hand, geom], y, scene)))
+
+
+def phase5_geom_report(pairs, purity=POS_PURITY):
+    """The stage-5 P4 gate numbers on the phase-4b pair caliber (``collect_phase4_pairs`` with
+    ``with_geom=True``): the 15 hand columns vs the 44 new pairwise-geometry columns, on every
+    cross-frame pair, on the hardest subset (re-observe vs adjacent) and on the touching negatives."""
+    hand_names = list(cross_feature_names())
+    rep = dict(purity=float(purity))
+    v = pairs['valid'].astype(bool)
+    hand, geom = pairs['hand'][v], pairs['geom'][v]
+    y, scene, rel = pairs['y'][v].astype(bool), pairs['scene'][v], pairs['rel'][v]
+    rep['cross'] = _geom_block(hand, geom, y, scene)
+    m = (rel == 'reobserve') | (rel == 'adjacent')
+    rep['hardest_reobserve_vs_adjacent'] = _geom_block(hand[m], geom[m], y[m], scene[m])
+    i0 = hand_names.index('inter0_frac_min')
+    mneg = (~y) & (hand[:, i0] > 0)
+    mt = y | mneg
+    rep['touching_negative'] = _geom_block(hand[mt], geom[mt], y[mt], scene[mt])
     return rep
